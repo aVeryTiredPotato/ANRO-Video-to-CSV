@@ -8,29 +8,29 @@ import easyocr
 import torch
 import moviepy as mp
 
-# --- GPU Initialization ---
+# --- GPU Initialization --- (delete this line if you want to use your cpu for some reason)
 reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
 
 # --- Paths ---
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-video_path = os.path.join(base_dir, "anroShiftNov3rd.mkv")
+video_path = os.path.join(base_dir, "anroShiftNov3rd.mkv") # Ensure that you change the name of this file
 
-# Create a 10s test clip (60s–70s)
+# Create a 10s test clip (60s–70s) (completely optional, just used for testing. if youre confident in the results, you can remove these lines)
 clip = mp.VideoFileClip(video_path).subclipped(60, 70)
 clip.write_videofile(os.path.join(base_dir, "test_clip.mp4"), codec="libx264")
 video_path = os.path.join(base_dir, "test_clip.mp4")
 
-output_csv = "reactor_readings_cleaned_new.csv"
+output_csv = "reactor_readings_cleaned.csv"
 error_log = "ocr_errors.log"
 
-# Debug output for ROI snapshots
+# Debug output for ROI snapshots (will make copies of the RIO snapshots into its own folder. Set this to false if not in use, as it will make a lot of images)
 DEBUG_SAVE_ROI = True
 ROI_DEBUG_RATE = 50  # save every Nth frame
 ROI_DEBUG_DIR = "roi_debug"
 if DEBUG_SAVE_ROI:
     os.makedirs(ROI_DEBUG_DIR, exist_ok=True)
 
-# --- Regions of Interest (ROIs) ---
+# --- Regions of Interest (ROIs) --- (ensure that you change these values per video, no two videos will have the same coordinates)
 regions = {
     "coolant": (2237, 151, 2329, 185),
     "rod_insertion": (2092, 255, 2165, 287),
@@ -42,9 +42,9 @@ regions = {
 
 # Optional ROI paddings (l, t, r, b) to reduce tight crops
 ROI_PAD = {
-    # Fuel tends to clip the last digit when animating → add right padding
+    # Fuel tends to clip the last digit when animating --> add right padding
     "fuel": (0, 0, 10, 0),
-    # Rod insertion can lose bottom strokes → add bottom padding
+    # Rod insertion can lose bottom strokes --> add bottom padding
     "rod_insertion": (0, 0, 0, 4),
 }
 
@@ -68,7 +68,7 @@ def prefer_near(prev, cand, max_jump):
         return cand
     return cand if abs(cand - prev) <= max_jump else prev
 
-# --- OCR preprocessing (simple, robust) ---
+# --- OCR preprocessing ---
 def preprocess_variants_simple(roi):
     roi = cv2.copyMakeBorder(roi, 2, 2, 2, 2, cv2.BORDER_REPLICATE)
     g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -359,4 +359,3 @@ output_path = os.path.join(os.path.dirname(video_path), output_csv)
 df.to_csv(output_path, index=False)
 
 print(f"\nCleaned data saved to {output_path}")
-print(f"OCR pass complete (GPU={torch.cuda.is_available()})")
