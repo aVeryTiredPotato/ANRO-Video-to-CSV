@@ -7,8 +7,9 @@ This project extracts and interprets reactor telemetry data from control-room fo
 
 ## Usage
 1. Place your video file (`.mkv` or `.mp4`) in the project root.
-2. Run `dataGrabber.py` inside your virtual environment.
-3. The processed data will be saved as reactor_readings_cleaned.csv.
+2. Run `boundaryFinder.py` inside your virtual environment, follow the instructions in the console.
+3. Run `dataGrabber.py` inside your virtual environment.
+4. The processed data will be saved as reactor_readings_cleaned.csv.
 
 ## Requirements
 
