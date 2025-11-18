@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import cv2
 import numpy as np
@@ -21,6 +22,7 @@ DEFAULT_VIDEO_NAME = "2025-11-04 17-16-32.mkv"  # Ensure that you change the nam
 DEFAULT_OUTPUT_CSV = "reactor_readings_cleaned.csv"
 DEFAULT_ERROR_LOG = "ocr_errors.log"
 DEFAULT_RAW_OUTPUT_CSV = "reactor_readings_raw.csv"
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "roi_config.json")
 
 # Mutable runtime config (overridden by start())
 video_path = os.path.join(base_dir, DEFAULT_VIDEO_NAME)
@@ -93,10 +95,42 @@ ROI_PAD = {
     "rod_insertion": (0, 0, 0, 4),
 }
 
+def load_roi_config(config_path: str = None):
+    """Load ROI coordinates and optional video path from a JSON config."""
+    global regions
+    path = os.path.abspath(config_path) if config_path else CONFIG_PATH
+    if not os.path.isfile(path):
+        print(f"ROI config not found at {path}; using built-in defaults.")
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        updated_regions = {}
+        cfg_regions = data.get("regions", {})
+        if isinstance(cfg_regions, dict):
+            for key, val in cfg_regions.items():
+                if isinstance(val, (list, tuple)) and len(val) == 4:
+                    updated_regions[key] = tuple(int(v) for v in val)
+        if updated_regions:
+            regions.update(updated_regions)
+
+        out = {}
+        if "video_path" in data:
+            out["video_path"] = os.path.abspath(data["video_path"])
+        if updated_regions:
+            out["regions"] = updated_regions
+
+        print(f"Loaded ROI config from {path}")
+        return out
+    except Exception as e:
+        print(f"Warning: failed to load ROI config {path}: {e}")
+        return {}
+
 # --- Sanity Ranges ---
 RANGES = {
     "temperature": (300, 4000),
-    "pressure": (500, 10000),
+    "pressure": (500, 20000),
     "fuel": (0, 100),
     "rod_insertion": (0, 100),
 }
@@ -903,6 +937,7 @@ def start(
     input_file=None,
     output_file=None,
     *,
+    config_file=None,
     raw_output_file=None,
     error_log_file=None,
     sample_fps=None,
@@ -917,6 +952,7 @@ def start(
     Args:
         input_file: Path to the source video. Defaults to DEFAULT_VIDEO_NAME under base_dir.
         output_file: Optional path for the cleaned CSV export.
+        config_file: Optional JSON file produced by boundaryFinderModular.py containing video path and ROIs.
         raw_output_file: Optional path for the raw (unsmoothed) CSV export.
         error_log_file: Optional path for OCR error logging.
         sample_fps: Frames-per-second sampling override.
@@ -930,6 +966,9 @@ def start(
     global _custom_output_path, _custom_raw_output_path
     global state_buffers, pending_updates, pending_jumps, conf_ema, raw_rows
 
+    cfg = load_roi_config(config_file)
+    cfg_video_path = cfg.get("video_path") if cfg else None
+
     SAMPLE_FPS = sample_fps if sample_fps is not None else DEFAULT_SAMPLE_FPS
     DEBUG_TOGGLE = debug if debug is not None else DEFAULT_DEBUG_TOGGLE
     ROI_DEBUG_RATE = roi_debug_rate if roi_debug_rate is not None else DEFAULT_ROI_DEBUG_RATE
@@ -939,7 +978,12 @@ def start(
     _custom_output_path = None
     _custom_raw_output_path = None
 
-    video_path = os.path.abspath(input_file) if input_file else os.path.join(base_dir, DEFAULT_VIDEO_NAME)
+    if input_file:
+        video_path = os.path.abspath(input_file)
+    elif cfg_video_path:
+        video_path = cfg_video_path
+    else:
+        video_path = os.path.join(base_dir, DEFAULT_VIDEO_NAME)
 
     if output_file:
         abs_out = os.path.abspath(output_file)
