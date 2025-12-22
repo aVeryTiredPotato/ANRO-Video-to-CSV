@@ -1,26 +1,6 @@
-# Core scientific stack
-numpy==2.2.6
-pandas==2.3.3
-scikit-learn==1.7.2
-scipy==1.16.3
-sympy==1.13.1
-
-# Plotting
-matplotlib==3.10.7
-
-# OCR and video input
-easyocr==1.7.2
-opencv-python-headless==4.12.0.88
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
-torchaudio==2.5.1+cu121
-
-# Symbolic regression / Julia bridge
-pysr==1.5.9
-juliacall==0.9.26
-juliapkg==0.1.22
-
-# Utilities
-tqdm==4.67.1
-python-dateutil==2.9.0.post0
-pillow==11.3.0
+numpy
+pandas
+opencv-python
+tqdm
+easyocr
+moviepy
