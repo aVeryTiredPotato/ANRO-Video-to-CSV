@@ -12,17 +12,23 @@ def _pick_default_input() -> str:
     return os.path.join(base_dir, "reactor_readings_cleaned.csv")
 
 
+KEY_NUMERIC = [
+    "timestamp",
+    "temperature",
+    "pressure",
+    "fuel",
+    "rod_insertion",
+    "coolant",
+    "feedwater",
+    "water_level",
+    "feedwater_flow",
+]
+KEY_STATE = ["coolant", "feedwater"]
+
 def _cast_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    for c in [
-        "timestamp",
-        "temperature",
-        "pressure",
-        "fuel",
-        "rod_insertion",
-        "coolant",
-        "feedwater",
-    ]:
-        if c in df.columns:
+    # Cast known numeric columns and any other column that already looks numeric
+    for c in df.columns:
+        if (c in KEY_NUMERIC) or (pd.api.types.is_numeric_dtype(df[c])):
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
@@ -63,19 +69,13 @@ def build_features_and_flags(
     out = pd.DataFrame(index=df.index)
     if n == 0:
         return out, out
+    if "timestamp" not in df.columns or "temperature" not in df.columns:
+        # Cannot derive slopes without time and temperature
+        return out, out
 
-    # Copy base signals
-    for c in [
-        "timestamp",
-        "temperature",
-        "pressure",
-        "fuel",
-        "rod_insertion",
-        "coolant",
-        "feedwater",
-    ]:
-        if c in df.columns:
-            out[c] = df[c]
+    # Copy all input columns through to the features output for flexibility
+    for c in df.columns:
+        out[c] = df[c]
 
     # Smooth and derive slopes
     t_s = _rolling_median(df["temperature"], slope_window)
@@ -85,14 +85,18 @@ def build_features_and_flags(
         out["dPdt"] = _slope_per_second(p_s, df["timestamp"]).astype(float)
 
     # Controls steady: avoid attributing to RV during adjustments
+    # Controls steady when rods near nominal, feedwater at 2/2, coolant enabled, and fuel above threshold
+    controls_steady = pd.Series(True, index=df.index)
     rods = df.get("rod_insertion", pd.Series(np.nan, index=df.index))
-    rods_prev = rods.shift(1)
-    coolant = df.get("coolant", pd.Series(np.nan, index=df.index))
-    coolant_prev = coolant.shift(1)
-    controls_steady = (
-        (rods.notna() & rods_prev.notna() & (rods - rods_prev).abs() <= 0.2)
-        & (coolant.notna() & coolant_prev.notna() & (coolant == coolant_prev))
-    )
+    if "rod_insertion" in df.columns:
+        controls_steady &= np.isclose(rods, float(rod_nominal), atol=1e-6)
+    if "feedwater" in df.columns:
+        fw = pd.to_numeric(df["feedwater"], errors="coerce")
+        controls_steady &= (fw >= 2)
+    if "coolant" in df.columns:
+        controls_steady &= (pd.to_numeric(df["coolant"], errors="coerce") >= 1)
+    if "fuel" in df.columns:
+        controls_steady &= (pd.to_numeric(df["fuel"], errors="coerce") > float(min_fuel))
     out["controls_steady"] = controls_steady.fillna(False)
 
     # Stable regime (feedwater assumed working; do not require feedwater state)
@@ -219,7 +223,7 @@ def main():
 
     # Optional interpolation on filtered numeric columns
     if int(args.interp_limit) > 0 and len(filt) > 0:
-        num_cols = [c for c in ["temperature", "pressure", "fuel", "rod_insertion"] if c in filt.columns]
+        num_cols = [c for c in filt.columns if c not in KEY_STATE and c != "timestamp" and pd.api.types.is_numeric_dtype(filt[c])]
         for c in num_cols:
             filt[c] = pd.to_numeric(filt[c], errors="coerce")
             filt[c] = filt[c].interpolate(method="linear", limit=int(args.interp_limit), limit_direction="both").round(1)
