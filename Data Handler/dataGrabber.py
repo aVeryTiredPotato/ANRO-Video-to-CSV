@@ -9,6 +9,30 @@ import torch
 import moviepy as mp
 import sys
 import subprocess
+from typing import Optional
+
+# --- Paths ---
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+video_path = os.path.join(base_dir, "2025-12-07 15-59-55.mkv") # Ensure that you change the name of this file
+
+# --- Regions of Interest (ROIs) --- (ensure that you change these values per video, no two videos will have the same coordinates)
+regions = {
+    "coolant": (0,0,0,0),
+    "rod_insertion": (1731,1231,1804,1251),
+    "feedwater": (1277,63,1474,100),
+    "fuel": (1314,203,1453,240),
+    "pressure": (1448,361,1635,397),
+    "temperature": (1470,433,1635,470),
+    "water_level": (1185,1059,1281,1087),        # fill actual coords; if left 0 → ignored
+    "feedwater_flow": (1192,1108,1286,1142),     # fill actual coords; if left 0 → ignored
+}
+
+# --- Sampling Control ---
+# Set how many frames per second to OCR (e.g., 60, 30, 15). None means process all frames.
+SAMPLE_FPS = 60
+
+# Debug output for ROI snapshots (set False to disable extra images and conf columns)
+DEBUG_TOGGLE = False
 
 # --- GPU Initialization ---
 # Allow forcing CPU via CLI flag --force-cpu to avoid CUDA hangs
@@ -32,39 +56,20 @@ if _use_gpu:
     print("EasyOCR detector and recognizer moved to GPU.")
     print("Device:", next(reader.recognizer.parameters()).device)
 
-# --- Paths ---
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-video_path = os.path.join(base_dir, "2025-11-04 17-16-32.mkv") # Ensure that you change the name of this file
 
 output_csv = "reactor_readings_cleaned.csv"
 error_log = "ocr_errors.log"
 
-# --- Sampling Control ---
-# Set how many frames per second to OCR (e.g., 60, 30, 15). None means process all frames.
-SAMPLE_FPS = 15
-
-# Debug output for ROI snapshots (set False to disable extra images and conf columns)
-DEBUG_TOGGLE = True
 ROI_DEBUG_RATE = 50  # save every Nth frame
 ROI_DEBUG_DIR = "roi_debug"
 if DEBUG_TOGGLE:
     os.makedirs(ROI_DEBUG_DIR, exist_ok=True)
     # Create a small test clip, to avoid checking ENTIRE video every time
     # Disable audio to reduce I/O and encoding time
-    clip = mp.VideoFileClip(video_path, audio=False).subclipped(0, 90)
+    clip = mp.VideoFileClip(video_path, audio=False).subclipped(0, 60)
     clip.write_videofile(os.path.join(base_dir, "test_clip.mp4"), codec="libx264", audio=False, logger='bar')
     clip.close()
     video_path = os.path.join(base_dir, "test_clip.mp4")
-
-# --- Regions of Interest (ROIs) --- (ensure that you change these values per video, no two videos will have the same coordinates)
-regions = {
-    "coolant": (2098, 182, 2176, 152),
-    "rod_insertion": (1967, 272, 2033, 245),
-    "feedwater": (1921, 381, 2039, 353),
-    "fuel": (1932, 470, 2004, 445),
-    "pressure": (2001, 564, 2117, 540),
-    "temperature": (2007, 607, 2105, 584),
-}
 
 # Optional ROI paddings (l, t, r, b) to reduce tight crops
 ROI_PAD = {
@@ -76,11 +81,14 @@ ROI_PAD = {
 
 # --- Sanity Ranges ---
 RANGES = {
-    "temperature": (300, 4000),
-    "pressure": (500, 10000),
-    "fuel": (0, 100),
-    "rod_insertion": (0, 100),
+    "temperature":    (300, 4000),
+    "pressure":       (500, 15000),
+    "fuel":           (0, 100),
+    "rod_insertion":  (0, 100),
+    "water_level":    (0, 100),   # 0–100 %
+    "feedwater_flow": (0, 2.0),   # 0–~2 L/s (0, 0.91, 1.82)
 }
+
 
 # --- Confidence + constraints ---
 # Minimum confidence to accept a fresh value per signal
@@ -194,6 +202,83 @@ def _extract_value_for_key(key: str, text: str):
         m = _PATTERNS['pressure'].match(t)
         return float(m.group('VAL')) if m else None
     return None
+
+def parse_water_level(text: str, prev: Optional[float] = None):
+    """Parse water level while fixing missing/misplaced decimals using heuristics."""
+    if not text:
+        return None
+
+    raw = _normalize_text(text).translate(DIGIT_FIX_SAFE).replace("%", "")
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    digits_only = re.sub(r"[^0-9]", "", raw)
+    candidates = {}
+
+    def _add_candidate(val, penalty):
+        if val is None:
+            return
+        v = round(float(val), 1)
+        if 0.0 <= v <= 100.0:
+            prev_penalty = candidates.get(v)
+            if prev_penalty is None or penalty < prev_penalty:
+                candidates[v] = penalty
+
+    def _try_float(text_value, penalty):
+        try:
+            _add_candidate(float(text_value), penalty)
+        except ValueError:
+            pass
+
+    base_penalty = 0.0 if "." in raw else 0.08
+    _try_float(raw, base_penalty)
+
+    if raw.count(".") > 1:
+        collapsed = raw.replace(".", "", raw.count(".") - 1)
+        _try_float(collapsed, base_penalty + 0.02)
+
+    if digits_only:
+        try:
+            digits_val = int(digits_only)
+            # Treat plain integer, but penalize since display normally shows a decimal.
+            _add_candidate(float(digits_val), 0.25)
+            decimal_penalty = 0.05 if "." not in raw else 0.10
+            _add_candidate(digits_val / 10.0, decimal_penalty)
+            # Allow one more shift (e.g., OCR inserted decimal too early).
+            if digits_val >= 10:
+                _add_candidate(digits_val / 100.0, decimal_penalty + 0.05)
+        except ValueError:
+            pass
+
+    if not candidates:
+        return None
+
+    if prev is None:
+        chosen = min(candidates.items(), key=lambda kv: (kv[1], -kv[0]))
+    else:
+        chosen = min(candidates.items(), key=lambda kv: (abs(kv[0] - prev), kv[1]))
+    return round(chosen[0], 1)
+
+def parse_feedwater_flow(text: str):
+    """
+    Accepts '1.82 L/S', '0 L/S', '0.91L/S', '1.82', '0.91', etc.
+    Snaps to one of {0, 0.91, 1.82}.
+    """
+    if not text:
+        return None
+    t = _normalize_text(text)
+    t = t.replace("L/S","").replace("LS","")
+    t = re.sub(r"[^0-9.]", "", t)
+
+    try:
+        raw = float(t)
+    except:
+        return None
+
+    candidates = [0.0, 0.91, 1.82]
+    snapped = min(candidates, key=lambda x: abs(x - raw))
+    return snapped
 
 def _unit_bonus(key: str, text: str) -> float:
     t = _normalize_text(text).upper()
@@ -312,6 +397,7 @@ def ocr_state_variants_simple(variants, keywords):
     # Prefer the class with more aggregated evidence; tie favors OPEN
     found_open = (open_sum >= closed_sum) and (open_sum > 0.0)
     return found_open, min(0.99, best_c), best_t
+
 _FEED_RE = re.compile(r"([0-2])\s*/\s*2")
 def parse_feedwater_count(text: str):
     if not text:
@@ -327,8 +413,6 @@ def parse_feedwater_count(text: str):
         return int(m.group(1))
     except ValueError:
         return None
-
-
 
 def ocr_feedwater_count_from_variants(roi, variants):
     # Crop to where the ratio is (left side) to avoid letters in ACTIVE
@@ -380,7 +464,18 @@ STATE_WINDOW = 5  # smoothing window for states
 state_buffers = {"coolant": [], "feedwater": []}
 
 # Pending change confirmation (e.g., require 2 consecutive frames)
-pending_updates = {"fuel": {"cand": None, "count": 0}}
+# Pending change confirmation (e.g., require 2 consecutive frames)
+pending_updates = {
+    "fuel": {"cand": None, "count": 0},
+    # Debounce single-frame glitches in water level
+    "water_level": {"cand": None, "count": 0},
+    # Debounce single-frame glitches in feedwater_flow (0 / 0.91 / 1.82)
+    "feedwater_flow": {"cand": None, "count": 0},
+}
+
+# Max per-frame believable jump for water level (in %)
+MAX_DELTA_WATER_PER_FRAME = 1.0
+
 
 # Pending large-jump acceptance to avoid lock-in
 MAX_JUMP_PER_FRAME = {"temperature": 120.0, "pressure": 120.0, "rod_insertion": 2.0}
@@ -404,7 +499,6 @@ def smooth_state(key: str, value: float):
     # Dynamic majority threshold so early frames don't default to 0
     needed = (len(state_buffers[key]) // 2) + 1
     return 1 if sum(state_buffers[key]) >= needed else 0
-
 
 def smooth_multistate(key, value):
     # Clamp to expected finite set and append
@@ -458,7 +552,14 @@ def get_sample_indices(total_frames: int, fps: float, sample_fps) -> list:
 sample_indices = get_sample_indices(total_frames, fps, SAMPLE_FPS)
 
 data_rows, errors = [], []
-last_ok = {k: None for k in ["temperature", "pressure", "fuel", "rod_insertion"]}
+last_ok = {
+    "temperature": None,
+    "pressure": None,
+    "fuel": None,
+    "rod_insertion": None,
+    "water_level": None,
+    "feedwater_flow": None,
+}
 
 print(f"Processing {len(sample_indices)} sampled frames (of {total_frames}) from {video_path}...")
 
@@ -499,6 +600,9 @@ for frame_idx, frame in tqdm(iter_sampled_frames(cap, sample_indices), total=len
     roi_map, fast_map, var_map = {}, {}, {}
     for key, (x1, y1, x2, y2) in regions.items():
         try:
+            # Skip disabled ROIs (all zeros)
+            if x1 == x2 == y1 == y2 == 0:
+                continue
             h, w = frame.shape[:2]
             x_lo, x_hi = (x1, x2) if x1 <= x2 else (x2, x1)
             y_lo, y_hi = (y1, y2) if y1 <= y2 else (y2, y1)
@@ -526,7 +630,15 @@ for frame_idx, frame in tqdm(iter_sampled_frames(cap, sample_indices), total=len
             errors.append(f"Frame {frame_idx} | {key}: ROI build failed: {e}")
 
     # Second: batched fast OCR per group
-    numeric_keys = [k for k in ("temperature","pressure","fuel","rod_insertion") if k in roi_map]
+    numeric_keys = [k for k in (
+        "temperature",
+        "pressure",
+        "fuel",
+        "rod_insertion",
+        "water_level",
+        "feedwater_flow"
+    ) if k in roi_map]
+
     state_keys = [k for k in ("coolant",) if k in roi_map]
     feed_keys = [k for k in ("feedwater",) if k in roi_map]
 
@@ -599,115 +711,218 @@ for frame_idx, frame in tqdm(iter_sampled_frames(cap, sample_indices), total=len
                     best_c, best_t, best_n = float(conf), t2, n
             pre[k] = (best_n, min(0.99, best_c), best_t)
 
-    # Third: per-key acceptance + fallbacks and per-field confidence capture
-    for key in regions.keys():
+    # --- Third: per-key acceptance + fallbacks and per-field confidence capture ---
+    for key in roi_map.keys():   # <--- IMPORTANT FIX: only process keys that have real ROIs
         try:
-            roi = roi_map.get(key)
+            roi = roi_map[key]
             variants = var_map.get(key, [])
             conf = 0.0
-            v = None
             rawt = ""
+            v = None
 
+            # --------------------------
+            # COOLANT STATE (binary)
+            # --------------------------
             if key == "coolant":
-                state_open, conf, rawt = pre.get(key, (None, 0.0, ""))
+                state_open, conf, rawt = pre.get(key, (None,0.0,""))
                 if state_open is None or conf < 0.20:
                     if not variants:
                         variants = preprocess_variants_simple(roi)
                         var_map[key] = variants
-                    state_open, conf, rawt = ocr_state_variants_simple(variants, ["OPEN","PEN","QPEN"]) 
-                raw_vals["coolant"] = 1 if state_open else 0
-                prev_state = state_buffers.get("coolant", [])[-1] if state_buffers.get("coolant") else 1
-                input_state = (1 if state_open else 0) if conf >= 0.20 else prev_state
-                v = smooth_state("coolant", input_state)
-                row["_raw_" + key] = rawt
-                row["_sus_" + key] = 1 if conf < 0.20 else 0
+                    state_open, conf, rawt = ocr_state_variants_simple(variants, ["OPEN","PEN","QPEN"])
 
-            elif key == "feedwater":
-                count, conf, rawt = pre.get(key, (None, 0.0, ""))
+                prev_state = state_buffers.get("coolant", [])[-1] if state_buffers["coolant"] else 1
+                stable_val = (1 if state_open else 0) if conf >= 0.20 else prev_state
+                v = smooth_state("coolant", stable_val)
+
+                row[key] = v
+                row["_raw_"+key] = rawt
+                row["_sus_"+key] = int(conf < 0.20)
+                row["_conf_"+key] = float(conf)
+                raw_vals[key] = rawt
+                continue
+
+            # --------------------------
+            # FEEDWATER HEADERS (0–2)
+            # --------------------------
+            if key == "feedwater":
+                count, conf, rawt = pre.get(key, (None,0.0,""))
                 if count is None or conf < 0.20:
                     if not variants:
                         variants = preprocess_variants_simple(roi)
                         var_map[key] = variants
                     count, conf, rawt = ocr_feedwater_count_from_variants(roi, variants)
-                raw_vals["feedwater"] = count
-                if count is None or conf < 0.20:
-                    prev_fw = state_buffers["feedwater"][-1] if state_buffers["feedwater"] else 0
-                    count_use = int(prev_fw)
-                else:
-                    count_use = int(max(0, min(2, count)))
-                v = smooth_multistate("feedwater", count_use)
-                row["_raw_" + key] = f"{v}/2 ACTIVE"
-                row["_sus_" + key] = 1 if conf < 0.20 else 0
 
-            else:
-                v_parsed, conf, rawt = pre.get(key, (None, 0.0, ""))
-                # If fast pass failed or is below per-field threshold, build heavy variants lazily
-                if v_parsed is None or conf < CONF_THRESH.get(key, 0.0):
+                if count is None:
+                    prev = state_buffers["feedwater"][-1] if state_buffers["feedwater"] else 0
+                    use = prev
+                else:
+                    use = max(0, min(2, int(count)))
+
+                v = smooth_multistate("feedwater", use)
+
+                row[key] = v
+                row["_raw_"+key] = f"{v}/2 ACTIVE"
+                row["_sus_"+key] = int(conf < 0.20)
+                row["_conf_"+key] = float(conf)
+                raw_vals[key] = rawt
+                continue
+
+            # --------------------------
+            # WATER LEVEL (%)
+            # debounced + anti-spike logic
+            # --------------------------
+            if key == "water_level":
+                txt = pre.get(key, (None,0.0,""))[2]
+                conf = pre.get(key, (None,0.0,""))[1]
+                prev_val = last_ok.get("water_level")
+                val = parse_water_level(txt, prev_val)
+
+                # fallback to strict OCR
+                if val is None or conf < 0.20:
                     if not variants:
                         variants = preprocess_variants_simple(roi)
                         var_map[key] = variants
-                    v_parsed, conf, rawt = ocr_numeric_for_key(key, variants)
-                v_raw = clamp_or_nan(v_parsed, key)
-                if key in ["fuel", "rod_insertion"] and v_raw is not None and 100.0 < v_raw < 200.0:
-                    v_raw = v_raw - 100.0
-                v = v_raw
-                raw_vals[key] = v_raw
-                row["_raw_" + key] = rawt
+                    best_v, best_c, best_t = None, 0.0, ""
+                    for img in variants:
+                        if len(img.shape)==2:
+                            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                        res = reader.readtext(img, detail=1, paragraph=False, allowlist="0123456789.%")
+                        for (_b,t,c) in res:
+                            pv = parse_water_level(t, prev_val)
+                            if pv is not None and c > best_c:
+                                best_v,best_c,best_t = pv,float(c),t
+                    if best_v is not None:
+                        val, conf, txt = best_v, best_c, best_t
+
+                # debouncing large jumps
+                prev = prev_val
                 suspect = 0
-
-                th = CONF_THRESH.get(key, 0.0)
-                if conf < th:
+                if val is not None and prev is not None and abs(val - prev) > MAX_DELTA_WATER_PER_FRAME:
                     suspect = 1
-                    v = None
-
-                if key == "pressure" and v is not None:
-                    v = round(v, 1)
-                if key == "temperature" and v is not None:
-                    v = round(v, 1)
-                if key in ["fuel", "rod_insertion"] and v is not None:
-                    v = round(v, 1)
-
-                if key in ("temperature", "pressure", "rod_insertion"):
-                    prev = last_ok[key]
-                    if v is not None and prev is not None and key in MAX_JUMP_PER_FRAME and abs(v - prev) > MAX_JUMP_PER_FRAME[key]:
-                        pj = pending_jumps[key]
-                        if pj["cand"] is not None and abs(v - pj["cand"]) <= JUMP_STABILITY_THRESH[key]:
-                            pj["count"] += 1
-                        else:
-                            pj["cand"], pj["count"] = v, 1
-                        if pj["count"] >= 2 and conf >= th:
-                            prev = v
-                            pending_jumps[key] = {"cand": None, "count": 0}
-                        v = prev
+                    pu = pending_updates["water_level"]
+                    if pu["cand"] is not None and abs(val - pu["cand"]) <= 0.1:
+                        pu["count"] += 1
                     else:
-                        pending_jumps[key] = {"cand": None, "count": 0}
+                        pu["cand"], pu["count"] = val, 1
+                    if pu["count"] >= 2:
+                        prev = val
+                        pending_updates["water_level"] = {"cand":None,"count":0}
+                    val = prev
+                else:
+                    pending_updates["water_level"] = {"cand":None,"count":0}
 
-                if key == "fuel":
-                    prev = last_ok[key]
-                    if v is not None and prev is not None and abs(v - prev) > MAX_DELTA_PER_FRAME["fuel"]:
-                        suspect = 1
-                        pu = pending_updates["fuel"]
-                        if pu["cand"] is not None and abs(v - pu["cand"]) <= 0.05:
-                            pu["count"] += 1
-                        else:
-                            pu["cand"], pu["count"] = v, 1
-                        if pu["count"] >= 2:
-                            prev = v
-                            pending_updates["fuel"] = {"cand": None, "count": 0}
-                        v = prev
+                if val is not None:
+                    last_ok["water_level"] = val
+
+                row[key] = val
+                row["_raw_"+key] = txt
+                row["_sus_"+key] = int(suspect or conf < 0.20)
+                row["_conf_"+key] = float(conf)
+                raw_vals[key] = txt
+                continue
+
+            # --------------------------
+            # FEEDWATER FLOW (0 / 0.91 / 1.82)
+            # with 2-frame confirmation
+            # --------------------------
+            if key == "feedwater_flow":
+                txt = pre.get(key, (None,0.0,""))[2]
+                conf = pre.get(key, (None,0.0,""))[1]
+                val = parse_feedwater_flow(txt)
+
+                # fallback OCR
+                if val is None or conf < 0.20:
+                    if not variants:
+                        variants = preprocess_variants_simple(roi)
+                        var_map[key] = variants
+                    best_v,best_c,best_t = None, 0.0, ""
+                    for img in variants:
+                        if len(img.shape)==2:
+                            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                        res = reader.readtext(img, detail=1, paragraph=False, allowlist="0123456789.")
+                        for (_b,t,c) in res:
+                            pv = parse_feedwater_flow(t)
+                            if pv is not None and c > best_c:
+                                best_v,best_c,best_t = pv,float(c),t
+                    if best_v is not None:
+                        val, conf, txt = best_v, best_c, best_t
+
+                # two-frame confirmation
+                prev = last_ok.get("feedwater_flow")
+                suspect = 0
+                if prev is not None and val is not None and val != prev:
+                    suspect = 1
+                    pu = pending_updates["feedwater_flow"]
+                    if pu["cand"] is not None and abs(val - pu["cand"]) < 1e-3:
+                        pu["count"] += 1
                     else:
-                        pending_updates["fuel"] = {"cand": None, "count": 0}
+                        pu["cand"], pu["count"] = val, 1
+                    if pu["count"] >= 2:
+                        prev = val
+                        pending_updates["feedwater_flow"] = {"cand":None,"count":0}
+                    val = prev
+                else:
+                    pending_updates["feedwater_flow"] = {"cand":None,"count":0}
 
-                if v is not None:
-                    last_ok[key] = v
-                row["_sus_" + key] = suspect
+                if val is not None:
+                    last_ok["feedwater_flow"] = val
+
+                row[key] = val
+                row["_raw_"+key] = txt
+                row["_sus_"+key] = int(suspect or conf < 0.20)
+                row["_conf_"+key] = float(conf)
+                raw_vals[key] = txt
+                continue
+
+            # --------------------------
+            # NUMERIC FIELDS
+            # temperature, pressure, fuel, rod_insertion
+            # --------------------------
+            v_parsed, conf, rawt = pre.get(key, (None,0.0,""))
+            if v_parsed is None or conf < CONF_THRESH.get(key, 0.0):
+                if not variants:
+                    variants = preprocess_variants_simple(roi)
+                    var_map[key] = variants
+                v_parsed, conf, rawt = ocr_numeric_for_key(key, variants)
+
+            v = clamp_or_nan(v_parsed, key)
+            if key in ["fuel","rod_insertion"] and v is not None and 100.0 < v < 200.0:
+                v -= 100.0
+
+            suspect = int(conf < CONF_THRESH.get(key, 0.0))
+
+            # smoothing using last_ok + jump filters
+            if key in MAX_JUMP_PER_FRAME:
+                prev = last_ok[key]
+                if v is not None and prev is not None and abs(v - prev) > MAX_JUMP_PER_FRAME[key]:
+                    pj = pending_jumps[key]
+                    if pj["cand"] is not None and abs(v - pj["cand"]) <= JUMP_STABILITY_THRESH[key]:
+                        pj["count"] += 1
+                    else:
+                        pj["cand"], pj["count"] = v, 1
+                    if pj["count"] >= 2 and conf >= CONF_THRESH.get(key, 0.0):
+                        prev = v
+                        pending_jumps[key] = {"cand":None,"count":0}
+                    v = prev
+                else:
+                    pending_jumps[key] = {"cand":None,"count":0}
+
+            if v is not None:
+                last_ok[key] = v
 
             row[key] = v
-            row["_conf_" + key] = float(conf)
+            row["_raw_"+key] = rawt
+            row["_sus_"+key] = suspect
+            row["_conf_"+key] = float(conf)
+            raw_vals[key] = rawt
+
+
         except Exception as e:
             errors.append(f"Frame {frame_idx} | {key}: {e}")
             row[key] = last_ok.get(key, None)
-            row["_conf_" + key] = 0.0
+            row["_conf_"+key] = 0.0
+
 
     data_rows.append(row)
     # Also accumulate a raw (no smoothing/interpolation) row for export
@@ -725,7 +940,16 @@ if errors:
 
 # --- Data Cleanup ---
 df = pd.DataFrame(data_rows)
-for col in ["temperature", "pressure", "fuel", "rod_insertion", "feedwater", "coolant"]:
+for col in [
+    "temperature",
+    "pressure",
+    "fuel",
+    "rod_insertion",
+    "feedwater",
+    "coolant",
+    "water_level",
+    "feedwater_flow"
+]:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -798,7 +1022,16 @@ print(f"\nCleaned data saved to {output_path}")
 try:
     if 'raw_rows' in globals() and raw_rows:
         df_raw = pd.DataFrame(raw_rows)
-        for col in ["temperature", "pressure", "fuel", "rod_insertion", "feedwater", "coolant"]:
+        for col in [
+            "temperature",
+            "pressure",
+            "fuel",
+            "rod_insertion",
+            "feedwater",
+            "coolant",
+            "water_level",
+            "feedwater_flow"
+        ]:
             if col in df_raw.columns:
                 df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
         raw_output_path = os.path.join(os.path.dirname(video_path), RAW_OUTPUT_CSV)
