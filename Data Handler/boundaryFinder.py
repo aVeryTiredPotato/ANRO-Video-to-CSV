@@ -6,10 +6,10 @@ print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU de
 
 # Paths
 script_dir = os.path.dirname(os.path.abspath(__file__))
-video_path = os.path.join(script_dir, "..", "2025-11-04 17-16-32.mkv")
+video_path = os.path.join(script_dir, "..", "2025-12-07 15-59-55.mkv") #change this name to the name of your video
 video_path = os.path.abspath(video_path)
 
-print("Current working directory:", os.getcwd())
+print("Current working directory:", os.getcwd()) 
 
 cap = cv2.VideoCapture(video_path)
 ret, frame = cap.read()
@@ -17,6 +17,7 @@ cap.release()
 
 if not ret:
     raise ValueError(f"Failed to read frame from {video_path}")
+
 cv2.imwrite("sample_frame.png", frame)
 
 image_path = "sample_frame.png"
@@ -45,7 +46,9 @@ def click_event(event, x, y, flags, param):
             cv2.putText(img, label, (mid_x-10, mid_y+5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             regions.append(tuple(current_points))
-            print(f"Region {len(regions)} saved: {current_points[0]} -> {current_points[1]}")
+            x1, y1 = current_points[0]
+            x2, y2 = current_points[1]
+            print(f"Region {len(regions)} saved: {x1},{y1},{x2},{y2}")
             current_points = []
 
     # Right click → reset
@@ -71,4 +74,6 @@ cv2.destroyAllWindows()
 # Print regions for copy-pasting
 print("\nFinal ROI coordinates:")
 for i, (p1, p2) in enumerate(regions, 1):
-    print(f"ROI {i}: {p1} -> {p2}")
+    x1, y1 = p1
+    x2, y2 = p2
+    print(f"ROI {i}: {x1},{y1},{x2},{y2}")
