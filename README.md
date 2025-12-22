@@ -7,12 +7,15 @@ This project extracts and interprets reactor telemetry data from control-room fo
 
 ## Usage
 1. Place your video file (`.mkv` or `.mp4`) in the project root.
-2. Run `boundaryFinder.py` inside your virtual environment, follow the instructions in the console.
-3. Run `dataGrabber.py` inside your virtual environment.
-4. The processed data will be saved as reactor_readings_cleaned.csv.
+2. Replace the video_path variables previous file name inside of `boundaryFinder.py` and `dataGrabber.py` with the name of the video file you want to extract data from.
+3. Run `boundaryFinder.py` inside your virtual environment, follow the instructions in the console.
+4. Run `dataGrabber.py` inside your virtual environment.
+5. The processed data will be saved as reactor_readings_cleaned.csv.
 
 ## Requirements
+Python Version 3.12
 
 Install dependencies:
 
 pip install -r requirements.txt
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
