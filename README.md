@@ -18,4 +18,5 @@ Python Version 3.12
 Install dependencies:
 
 pip install -r requirements.txt
+
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
