@@ -2,6 +2,7 @@ import os
 import argparse
 import pandas as pd
 import numpy as np
+from pandas.api.types import is_object_dtype
 import cv2
 import easyocr
 import torch
@@ -127,6 +128,18 @@ def main():
     outdir = args.outdir or os.path.dirname(os.path.abspath(args.cleaned))
     os.makedirs(outdir, exist_ok=True)
 
+    # Key metadata: determines how to OCR each column
+    KEY_TYPES = {
+        "temperature": "numeric",
+        "pressure": "numeric",
+        "fuel": "numeric",
+        "rod_insertion": "numeric",
+        "water_level": "numeric",
+        "feedwater_flow": "numeric",
+        "coolant": "state",
+        "feedwater": "feed",
+    }
+
     # Use only _sus_* markers from cleaned CSV to decide what to re-OCR
     report = cleaned.copy()
     ts = pd.to_numeric(report.get("timestamp", pd.Series(range(len(report)), dtype=float)), errors="coerce").fillna(0.0)
@@ -134,15 +147,8 @@ def main():
     if not sus_marker_cols:
         print("ERROR: No _sus_* columns found. Re-run dataGrabber.py with DEBUG_TOGGLE=True to include _sus_ markers.")
         return
-    # Build per-key suspect indices from available _sus_* columns
-    key_to_marker = {
-        "temperature": "_sus_temperature",
-        "pressure": "_sus_pressure",
-        "fuel": "_sus_fuel",
-        "rod_insertion": "_sus_rod_insertion",
-        "coolant": "_sus_coolant",
-        "feedwater": "_sus_feedwater",
-    }
+    # Build per-key suspect indices dynamically from available _sus_* columns
+    key_to_marker = {c.replace("_sus_", ""): c for c in sus_marker_cols}
     keys_requested = [k.strip() for k in args.keys.split(',') if k.strip()]
     keys_available = [k for k in keys_requested if key_to_marker.get(k, None) in report.columns]
     if not keys_available:
@@ -168,11 +174,25 @@ def main():
             raise ValueError(f"ROI must have 4 integers: {s}")
         return parts[0], parts[1], parts[2], parts[3]
 
+    # Only attach ROI entries for keys where an ROI was provided
+    def _maybe_parse_roi(name: str, val: str):
+        if val is None or str(val).strip() == "":
+            return None
+        try:
+            return parse_roi(val)
+        except Exception:
+            print(f"Warning: skipping ROI for {name}, could not parse: {val}")
+            return None
+
     rois: Dict[str, Tuple[int, int, int, int]] = {
-        "temperature": parse_roi(args.roi_temperature),
-        "pressure": parse_roi(args.roi_pressure),
-        "fuel": parse_roi(args.roi_fuel),
-        "rod_insertion": parse_roi(args.roi_rod),
+        k: v for k, v in {
+            "temperature": _maybe_parse_roi("temperature", args.roi_temperature),
+            "pressure": _maybe_parse_roi("pressure", args.roi_pressure),
+            "fuel": _maybe_parse_roi("fuel", args.roi_fuel),
+            "rod_insertion": _maybe_parse_roi("rod_insertion", args.roi_rod),
+            "coolant": _maybe_parse_roi("coolant", args.roi_coolant),
+            "feedwater": _maybe_parse_roi("feedwater", args.roi_feedwater),
+        }.items() if v is not None
     }
 
     keys = [k.strip() for k in args.keys.split(',') if k.strip()]
@@ -356,6 +376,11 @@ def main():
 
     replace_log = []
     updated = cleaned.copy()
+
+    # Ensure _raw_* columns can store string payloads safely (avoid float dtype warnings)
+    for col in [c for c in updated.columns if c.startswith("_raw_")]:
+        if not is_object_dtype(updated[col]):
+            updated[col] = updated[col].astype("object")
     os.makedirs(args.roi_debug_dir, exist_ok=True) if args.save_roi else None
 
     # Safety banner for VRAM mode
@@ -390,6 +415,7 @@ def main():
     tasks.sort(key=lambda x: x[0])
 
     processed_pairs = 0
+    pbar = tqdm(total=len(tasks), desc="Resuscitating", ncols=80) if tasks else None
     i = 0
     while i < len(tasks):
         frame_idx = tasks[i][0]
@@ -405,6 +431,8 @@ def main():
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, frame = cap.read()
         if not ok or frame is None:
+            if pbar:
+                pbar.update(len(group))
             continue
         h, w = frame.shape[:2]
 
@@ -415,6 +443,8 @@ def main():
 
         # Prepare primary ROI variants for batch
         for (_f, idx_row, key) in group:
+            if key not in rois:
+                continue
             x1, y1, x2, y2 = rois[key]
             x_lo, x_hi = (x1, x2) if x1 <= x2 else (x2, x1)
             y_lo, y_hi = (y1, y2) if y1 <= y2 else (y2, y1)
@@ -422,13 +452,14 @@ def main():
             x_hi, y_hi = min(w, x_hi), min(h, y_hi)
             base_roi = frame[y_lo:y_hi, x_lo:x_hi]
             v = fast_variant(base_roi)
-            if key in ("temperature", "pressure", "fuel", "rod_insertion"):
+            ktype = KEY_TYPES.get(key, "numeric")
+            if ktype == "numeric":
                 batch_num.append(v)
                 ctx_num.append((key, idx_row, frame_idx, base_roi))
-            elif key == "coolant":
+            elif ktype == "state":
                 batch_state.append(v)
                 ctx_state.append((key, idx_row, frame_idx, base_roi))
-            elif key == "feedwater":
+            elif ktype == "feed":
                 batch_feed.append(v)
                 ctx_feed.append((key, idx_row, frame_idx, base_roi))
 
@@ -474,8 +505,8 @@ def main():
             for ctx, res in zip(ctx_num, res_list):
                 key, idx_row, fidx, base_roi = ctx
                 val, conf, txt = handle_numeric(ctx, res)
-                # Fallback to strict if weak
-                if key in ("temperature", "pressure", "fuel", "rod_insertion") and (val is None or conf < strict_conf.get(key, 0.3)):
+                # Fallback to strict if weak (numeric keys only)
+                if KEY_TYPES.get(key, "numeric") == "numeric" and (val is None or conf < strict_conf.get(key, 0.3)):
                     # Try padded strict search
                     pads = [(0,0,0,0), (0,0,8,0), (0,0,0,4), (4,2,8,2)]
                     best_val, best_conf, best_txt = None, 0.0, ""
@@ -494,9 +525,9 @@ def main():
                         processed_pairs += 1
                     val, conf, txt = best_val, best_conf, best_txt
                 # Apply acceptance/update and always set conf/raw
-                if key in ("temperature", "pressure", "fuel", "rod_insertion"):
+                if KEY_TYPES.get(key, "numeric") == "numeric":
                     accept = (val is not None and conf >= strict_conf.get(key, 0.3))
-                    if accept:
+                    if accept and key in RANGES:
                         old = updated.at[idx_row, key] if key in updated.columns else None
                         lo, hi = RANGES[key]
                         if val is not None and (lo <= val <= hi) and ((pd.isna(old)) or (str(old) != str(val))):
@@ -564,10 +595,15 @@ def main():
                     updated.at[idx_row, sc] = 0
 
         # Final flush per frame done; continue to next frame
+        if pbar:
+            pbar.update(len(group))
+
+    if pbar:
+        pbar.close()
 
     # Save updated CSV without adding smoothing/interpolation
     # Final cleanup/interpolation and write directly to the cleaned CSV path
-    for col in ["temperature", "pressure", "fuel", "rod_insertion"]:
+    for col in [c for c, t in KEY_TYPES.items() if t == "numeric"]:
         if col in updated.columns:
             updated[col] = pd.to_numeric(updated[col], errors="coerce")
             updated[col] = updated[col].interpolate(method="linear", limit_direction="both").round(2)
