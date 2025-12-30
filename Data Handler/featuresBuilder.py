@@ -6,40 +6,49 @@ import numpy as np
 import pandas as pd
 
 
-def _pick_default_input() -> str:
+def _pickDefaultInput() -> str:
     # Always use the default cleaned CSV as the canonical source
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "reactor_readings_cleaned.csv")
+    baseDir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(baseDir, "reactor_readings_cleaned.csv")
 
 
-KEY_NUMERIC = [
+keyNumeric = [
     "timestamp",
     "temperature",
     "pressure",
     "fuel",
-    "rod_insertion",
+    "rodInsertion",
     "coolant",
     "feedwater",
-    "water_level",
-    "feedwater_flow",
+    "waterLevel",
+    "feedwaterFlow",
+    "totalOutput",
+    "currentPowerOrder",
+    "marginOfError",
+    "flowRate1",
+    "flowRate2",
+    "rpm1",
+    "rpm2",
+    "valvesPct1",
+    "valvesPct2",
 ]
-KEY_STATE = ["coolant", "feedwater"]
+keyState = ["coolant", "feedwater"]
 
-def _cast_numeric(df: pd.DataFrame) -> pd.DataFrame:
+def _castNumeric(df: pd.DataFrame) -> pd.DataFrame:
     # Cast known numeric columns and any other column that already looks numeric
     for c in df.columns:
-        if (c in KEY_NUMERIC) or (pd.api.types.is_numeric_dtype(df[c])):
+        if (c in keyNumeric) or (pd.api.types.is_numeric_dtype(df[c])):
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
 
-def _rolling_median(x: pd.Series, win: int) -> pd.Series:
+def _rollingMedian(x: pd.Series, win: int) -> pd.Series:
     if win <= 1:
         return x
     return x.rolling(int(win), center=True, min_periods=1).median()
 
 
-def _slope_per_second(y: pd.Series, t: pd.Series) -> pd.Series:
+def _slopePerSecond(y: pd.Series, t: pd.Series) -> pd.Series:
     dy = y.diff()
     dt = t.diff()
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -47,24 +56,25 @@ def _slope_per_second(y: pd.Series, t: pd.Series) -> pd.Series:
     return s.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
-def build_features_and_flags(
+def buildFeaturesAndFlags(
     df: pd.DataFrame,
     *,
-    slope_window: int = 3,
-    min_fuel: float = 75.0,
-    rod_nominal: float = 55.0,
-    rod_tol: float = 5.0,
-    require_coolant_open: bool = True,
-    dpdt_max: Optional[float] = None,
+    slopeWindow: int = 3,
+    minFuel: float = 75.0,
+    rodNominal: float = 55.0,
+    rodTol: float = 5.0,
+    requireCoolantOpen: bool = True,
+    dpdtMax: Optional[float] = None,
     # Relief valve parameters
-    rv_k_per_s: float = 7.5,
-    rv_match_tol: float = 1.5,
+    rvKPerS: float = 7.5,
+    rvMatchTol: float = 1.5,
     # Anomaly thresholds (positive/negative not accounted by RV)
-    rise_k_per_s: float = 10.0,
-    dip_k_per_s: float = 10.0,
-    pad_rows: int = 1,
+    riseKPerS: float = 10.0,
+    dipKPerS: float = 10.0,
+    padRows: int = 0,
+    minAnomalyRun: int = 2,
 ):
-    df = _cast_numeric(df.copy())
+    df = _castNumeric(df.copy())
     n = len(df)
     out = pd.DataFrame(index=df.index)
     if n == 0:
@@ -78,80 +88,100 @@ def build_features_and_flags(
         out[c] = df[c]
 
     # Smooth and derive slopes
-    t_s = _rolling_median(df["temperature"], slope_window)
-    p_s = _rolling_median(df["pressure"], slope_window) if "pressure" in df else None
-    out["dTdt"] = _slope_per_second(t_s, df["timestamp"]).astype(float)
-    if p_s is not None:
-        out["dPdt"] = _slope_per_second(p_s, df["timestamp"]).astype(float)
+    tS = _rollingMedian(df["temperature"], slopeWindow)
+    pS = _rollingMedian(df["pressure"], slopeWindow) if "pressure" in df else None
+    out["dTdt"] = _slopePerSecond(tS, df["timestamp"]).astype(float)
+    if pS is not None:
+        out["dPdt"] = _slopePerSecond(pS, df["timestamp"]).astype(float)
 
     # Controls steady: avoid attributing to RV during adjustments
     # Controls steady when rods near nominal, feedwater at 2/2, coolant enabled, and fuel above threshold
-    controls_steady = pd.Series(True, index=df.index)
-    rods = df.get("rod_insertion", pd.Series(np.nan, index=df.index))
-    if "rod_insertion" in df.columns:
-        controls_steady &= np.isclose(rods, float(rod_nominal), atol=1e-6)
+    controlsSteady = pd.Series(True, index=df.index)
+    rods = df.get("rodInsertion", pd.Series(np.nan, index=df.index))
+    if "rodInsertion" in df.columns:
+        controlsSteady &= np.isclose(rods, float(rodNominal), atol=1e-6)
     if "feedwater" in df.columns:
         fw = pd.to_numeric(df["feedwater"], errors="coerce")
-        controls_steady &= (fw >= 2)
+        controlsSteady &= (fw >= 2)
     if "coolant" in df.columns:
-        controls_steady &= (pd.to_numeric(df["coolant"], errors="coerce") >= 1)
+        controlsSteady &= (pd.to_numeric(df["coolant"], errors="coerce") >= 1)
     if "fuel" in df.columns:
-        controls_steady &= (pd.to_numeric(df["fuel"], errors="coerce") > float(min_fuel))
-    out["controls_steady"] = controls_steady.fillna(False)
+        controlsSteady &= (pd.to_numeric(df["fuel"], errors="coerce") > float(minFuel))
+    out["controls_steady"] = controlsSteady.fillna(False)
 
     # Stable regime (feedwater assumed working; do not require feedwater state)
     stable = pd.Series(True, index=df.index)
-    if require_coolant_open and "coolant" in df.columns:
+    if requireCoolantOpen and "coolant" in df.columns:
         stable &= (df["coolant"].fillna(0) >= 1)
     if "fuel" in df.columns:
-        stable &= (df["fuel"].fillna(-np.inf) >= float(min_fuel))
-    if "rod_insertion" in df.columns:
-        r = df["rod_insertion"].fillna(np.inf)
-        stable &= r.between(float(rod_nominal - rod_tol), float(rod_nominal + rod_tol))
-    if dpdt_max is not None and "dPdt" in out.columns:
-        stable &= (out["dPdt"].abs() <= float(dpdt_max))
+        stable &= (df["fuel"].fillna(-np.inf) >= float(minFuel))
+    if "rodInsertion" in df.columns:
+        r = df["rodInsertion"].fillna(np.inf)
+        stable &= r.between(float(rodNominal - rodTol), float(rodNominal + rodTol))
+    if dpdtMax is not None and "dPdt" in out.columns:
+        stable &= (out["dPdt"].abs() <= float(dpdtMax))
     out["stable"] = stable.fillna(False)
 
     # Relief valve estimate: negative slope magnitude / 7.5 K/s under stable and controls steady
-    cond_rv = out["stable"] & out["controls_steady"] & (out["dTdt"] < 0)
-    mag = (-out["dTdt"].clip(upper=0)).where(cond_rv, other=0.0)
+    condRv = out["stable"] & out["controls_steady"] & (out["dTdt"] < 0)
+    mag = (-out["dTdt"].clip(upper=0)).where(condRv, other=0.0)
     with np.errstate(invalid="ignore"):
-        rv_est = np.rint(mag / float(rv_k_per_s)).astype(int)
-    rv_est = np.clip(rv_est, 0, 4)
-    out["rv_est"] = rv_est
+        rvEst = np.rint(mag / float(rvKPerS)).astype(int)
+    rvEst = np.clip(rvEst, 0, 4)
+    out["rv_est"] = rvEst
 
     # Anomaly labelling
     exclude = np.zeros(n, dtype=bool)
     reason = np.array([""] * n, dtype=object)
 
     # Rows that look like deliberate RV pulls: do NOT exclude, just label
-    if rv_k_per_s > 0:
+    if rvKPerS > 0:
         # residual to nearest rv_est multiple
-        target = -rv_est.astype(float) * float(rv_k_per_s)
+        target = -rvEst.astype(float) * float(rvKPerS)
         resid = (out["dTdt"] - target).abs()
-        rv_like = cond_rv & (rv_est > 0) & (resid <= float(rv_match_tol))
-        out["rv_detected"] = rv_like.astype(bool)
-        for i in np.where(rv_like.to_numpy())[0]:
-            reason[i] = (reason[i] + "," if reason[i] else "") + f"rv_{int(rv_est.iloc[i])}"
+        rvLike = condRv & (rvEst > 0) & (resid <= float(rvMatchTol))
+        out["rv_detected"] = rvLike.astype(bool)
+        for i in np.where(rvLike.to_numpy())[0]:
+            reason[i] = (reason[i] + "," if reason[i] else "") + f"rv_{int(rvEst.iloc[i])}"
     else:
         out["rv_detected"] = False
 
-    # Rising temperature under stable + steady controls → likely coolant disabled externally
-    rise_hits = np.where((out["stable"]) & (out["controls_steady"]) & (out["dTdt"] >= float(rise_k_per_s)))[0]
-    for i in rise_hits:
+
+    def _enforceMinRun(mask: np.ndarray, minRun: int) -> np.ndarray:
+        if int(minRun) <= 1:
+            return mask
+        outMask = np.zeros_like(mask, dtype=bool)
+        runStart = None
+        for idx, val in enumerate(mask):
+            if val and runStart is None:
+                runStart = idx
+            elif not val and runStart is not None:
+                if idx - runStart >= int(minRun):
+                    outMask[runStart:idx] = True
+                runStart = None
+        if runStart is not None and (len(mask) - runStart) >= int(minRun):
+            outMask[runStart:] = True
+        return outMask
+
+    # Rising temperature under stable + steady controls -> likely coolant disabled externally
+    riseMask = (out["stable"] & out["controls_steady"] & (out["dTdt"] >= float(riseKPerS))).to_numpy()
+    riseMask = _enforceMinRun(riseMask, minAnomalyRun)
+    riseHits = np.where(riseMask)[0]
+    for i in riseHits:
         exclude[i] = True
         reason[i] = (reason[i] + "," if reason[i] else "") + "coolant_off_external"
 
     # Strong dips not explained by RV
-    dip_hits = np.where(
-        (out["stable"]) & (out["controls_steady"]) & (out["dTdt"] <= -float(dip_k_per_s)) & (~out["rv_detected"]))[0]
-    for i in dip_hits:
+    dipMask = (out["stable"] & out["controls_steady"] & (out["dTdt"] <= -float(dipKPerS)) & (~out["rv_detected"]))
+    dipMask = _enforceMinRun(dipMask.to_numpy(), minAnomalyRun)
+    dipHits = np.where(dipMask)[0]
+    for i in dipHits:
         exclude[i] = True
         reason[i] = (reason[i] + "," if reason[i] else "") + "unexplained_temp_dip"
 
     # Pad around excluded indices
-    if int(pad_rows) > 0 and (exclude.any()):
-        pad = int(pad_rows)
+    if int(padRows) > 0 and (exclude.any()):
+        pad = int(padRows)
         marks = np.zeros(n, dtype=bool)
         idxs = np.where(exclude)[0]
         for j in idxs:
@@ -172,28 +202,29 @@ def main():
     ap = argparse.ArgumentParser(
         description="Build features (dTdt/dPdt), detect RV events, and flag/exclude anomalies in one pass"
     )
-    ap.add_argument("--input", default=_pick_default_input(), help="Input CSV (resuscitated preferred)")
-    ap.add_argument("--out-features", default=None, help="Output CSV with features+flags (default: *_features.csv)")
-    ap.add_argument("--out-filtered", default=None, help="Output CSV with excluded rows removed (default: *_filtered.csv)")
+    ap.add_argument("--input", default=_pickDefaultInput(), help="Input CSV (resuscitated preferred)")
+    ap.add_argument("--out-features", dest="outFeatures", default=None, help="Output CSV with features+flags (default: *_features.csv)")
+    ap.add_argument("--out-filtered", dest="outFiltered", default=None, help="Output CSV with excluded rows removed (default: *_filtered.csv)")
 
     # Stability and slope params
-    ap.add_argument("--slope-window", type=int, default=3)
-    ap.add_argument("--min-fuel", type=float, default=75.0)
-    ap.add_argument("--rod", type=float, default=55.0)
-    ap.add_argument("--rod-tol", type=float, default=5.0)
-    ap.add_argument("--require-coolant-open", action="store_true", default=True)
-    ap.add_argument("--no-require-coolant-open", dest="require_coolant_open", action="store_false")
-    ap.add_argument("--dpdt-max", type=float, default=None)
+    ap.add_argument("--slope-window", dest="slopeWindow", type=int, default=3)
+    ap.add_argument("--min-fuel", dest="minFuel", type=float, default=75.0)
+    ap.add_argument("--rod", dest="rod", type=float, default=55.0)
+    ap.add_argument("--rod-tol", dest="rodTol", type=float, default=5.0)
+    ap.add_argument("--require-coolant-open", dest="requireCoolantOpen", action="store_true", default=True)
+    ap.add_argument("--no-require-coolant-open", dest="requireCoolantOpen", action="store_false")
+    ap.add_argument("--dpdt-max", dest="dpdtMax", type=float, default=None)
 
     # RV + anomaly thresholds
-    ap.add_argument("--rv-k-per-s", type=float, default=7.5)
-    ap.add_argument("--rv-match-tol", type=float, default=1.5)
-    ap.add_argument("--rise-k-per-s", type=float, default=10.0)
-    ap.add_argument("--dip-k-per-s", type=float, default=10.0)
-    ap.add_argument("--pad-rows", type=int, default=1)
+    ap.add_argument("--rv-k-per-s", dest="rvKPerS", type=float, default=7.5)
+    ap.add_argument("--rv-match-tol", dest="rvMatchTol", type=float, default=1.5)
+    ap.add_argument("--rise-k-per-s", dest="riseKPerS", type=float, default=10.0)
+    ap.add_argument("--dip-k-per-s", dest="dipKPerS", type=float, default=10.0)
+    ap.add_argument("--pad-rows", dest="padRows", type=int, default=0)
+    ap.add_argument("--min-anomaly-run", dest="minAnomalyRun", type=int, default=2, help="Min consecutive rows to flag an anomaly")
 
     # Optional: interpolate small gaps in filtered output
-    ap.add_argument("--interp-limit", type=int, default=0, help="If >0, interpolate up to N-row gaps in numeric cols")
+    ap.add_argument("--interp-limit", dest="interpLimit", type=int, default=0, help="If >0, interpolate up to N-row gaps in numeric cols")
 
     args = ap.parse_args()
 
@@ -202,39 +233,40 @@ def main():
 
     df = pd.read_csv(args.input)
 
-    feats, filt = build_features_and_flags(
+    feats, filt = buildFeaturesAndFlags(
         df,
-        slope_window=int(args.slope_window),
-        min_fuel=float(args.min_fuel),
-        rod_nominal=float(args.rod),
-        rod_tol=float(args.rod_tol),
-        require_coolant_open=bool(args.require_coolant_open),
-        dpdt_max=(float(args.dpdt_max) if args.dpdt_max is not None else None),
-        rv_k_per_s=float(args.rv_k_per_s),
-        rv_match_tol=float(args.rv_match_tol),
-        rise_k_per_s=float(args.rise_k_per_s),
-        dip_k_per_s=float(args.dip_k_per_s),
-        pad_rows=int(args.pad_rows),
+        slopeWindow=int(args.slopeWindow),
+        minFuel=float(args.minFuel),
+        rodNominal=float(args.rod),
+        rodTol=float(args.rodTol),
+        requireCoolantOpen=bool(args.requireCoolantOpen),
+        dpdtMax=(float(args.dpdtMax) if args.dpdtMax is not None else None),
+        rvKPerS=float(args.rvKPerS),
+        rvMatchTol=float(args.rvMatchTol),
+        riseKPerS=float(args.riseKPerS),
+        dipKPerS=float(args.dipKPerS),
+        padRows=int(args.padRows),
+        minAnomalyRun=int(args.minAnomalyRun),
     )
 
     base, ext = os.path.splitext(args.input)
-    out_features = args.out_features or f"{base}_features.csv"
-    out_filtered = args.out_filtered or f"{base}_filtered.csv"
+    outFeatures = args.outFeatures or f"{base}_features.csv"
+    outFiltered = args.outFiltered or f"{base}_filtered.csv"
 
     # Optional interpolation on filtered numeric columns
-    if int(args.interp_limit) > 0 and len(filt) > 0:
-        num_cols = [c for c in filt.columns if c not in KEY_STATE and c != "timestamp" and pd.api.types.is_numeric_dtype(filt[c])]
-        for c in num_cols:
+    if int(args.interpLimit) > 0 and len(filt) > 0:
+        numCols = [c for c in filt.columns if c not in keyState and c != "timestamp" and pd.api.types.is_numeric_dtype(filt[c])]
+        for c in numCols:
             filt[c] = pd.to_numeric(filt[c], errors="coerce")
-            filt[c] = filt[c].interpolate(method="linear", limit=int(args.interp_limit), limit_direction="both").round(1)
+            filt[c] = filt[c].interpolate(method="linear", limit=int(args.interpLimit), limit_direction="both").round(1)
 
-    feats.to_csv(out_features, index=False)
-    filt.to_csv(out_filtered, index=False)
+    feats.to_csv(outFeatures, index=False)
+    filt.to_csv(outFiltered, index=False)
 
     excluded = int(feats["_exclude"].sum()) if "_exclude" in feats.columns else 0
-    rv_hits = int(feats.get("rv_detected", pd.Series(False)).sum())
+    rvHits = int(feats.get("rv_detected", pd.Series(False)).sum())
     print(
-        f"Wrote {out_features} and {out_filtered} | rows={len(feats)} | excluded={excluded} | rv_events={rv_hits}"
+        f"Wrote {outFeatures} and {outFiltered} | rows={len(feats)} | excluded={excluded} | rv_events={rvHits}"
     )
 
 
