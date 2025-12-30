@@ -1,79 +1,159 @@
-import os, cv2, random
+import os
+import cv2
+import random
 import torch
+
 print(torch.cuda.is_available())
 print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU detected")
 
-
 # Paths
-script_dir = os.path.dirname(os.path.abspath(__file__))
-video_path = os.path.join(script_dir, "..", "2025-12-07 15-59-55.mkv") #change this name to the name of your video
-video_path = os.path.abspath(video_path)
+scriptDir = os.path.dirname(os.path.abspath(__file__))
+baseDir = os.path.abspath(os.path.join(scriptDir, ".."))
 
-print("Current working directory:", os.getcwd()) 
+def pickLatestVideo(rootDir: str) -> str:
+    exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv"}
+    candidates = []
+    for name in os.listdir(rootDir):
+        path = os.path.join(rootDir, name)
+        if not os.path.isfile(path):
+            continue
+        if os.path.splitext(name)[1].lower() in exts:
+            candidates.append(path)
+    if not candidates:
+        raise FileNotFoundError(f"No video files found in {rootDir}")
+    return max(candidates, key=lambda p: os.path.getmtime(p))
 
-cap = cv2.VideoCapture(video_path)
+videoPath = pickLatestVideo(baseDir)
+print(f"Using video: {videoPath}")
+
+print("Current working directory:", os.getcwd())
+
+cap = cv2.VideoCapture(videoPath)
 ret, frame = cap.read()
 cap.release()
 
 if not ret:
-    raise ValueError(f"Failed to read frame from {video_path}")
+    raise ValueError(f"Failed to read frame from {videoPath}")
 
 cv2.imwrite("sample_frame.png", frame)
 
-image_path = "sample_frame.png"
-img = cv2.imread(image_path)
+imagePath = "sample_frame.png"
+img = cv2.imread(imagePath)
 clone = img.copy()
+
+# List keys in the order you want to fill them (press SPACE to skip a key).
+roiKeys = [
+    # Primary systems
+    "coolant",
+    "rodInsertion",
+    "feedwater",
+    # Primary readings
+    "fuel",
+    "pressure",
+    "temperature",
+    # Feedwater readings
+    "waterLevel",
+    "feedwaterFlow",
+    # Power output readings
+    "totalOutput",
+    "currentPowerOrder",
+    "marginOfError",
+    # Turbine 1
+    "flowRate1",
+    "rpm1",
+    "valvesPct1",
+    # Turbine 2
+    "flowRate2",
+    "rpm2",
+    "valvesPct2",
+]
 
 # Storage for marked regions
 regions = []
-current_points = []
+currentPoints = []
+roiMap = {}
+keyIdx = 0
 
-def click_event(event, x, y, flags, param):
-    global current_points, img
-    # Left click → record corner
+def announceKey():
+    if keyIdx < len(roiKeys):
+        print(f"Current key: {roiKeys[keyIdx]} ({keyIdx + 1}/{len(roiKeys)})")
+    else:
+        print("All keys filled. Press ESC to quit or right-click to reset.")
+
+def clickEvent(event, x, y, flags, param):
+    global currentPoints, img, keyIdx
+    # Left click - record corner
     if event == cv2.EVENT_LBUTTONDOWN:
-        current_points.append((x, y))
-        if len(current_points) == 2:
+        if keyIdx >= len(roiKeys):
+            print("All keys filled. Press ESC to quit or right-click to reset.")
+            return
+        currentPoints.append((x, y))
+        if len(currentPoints) == 2:
             color = (
                 random.randint(0, 255),
                 random.randint(0, 255),
-                random.randint(0, 255)
+                random.randint(0, 255),
             )
-            cv2.rectangle(img, current_points[0], current_points[1], color, 2)
-            label = f"{len(regions)+1}"
-            mid_x = int((current_points[0][0] + current_points[1][0]) / 2)
-            mid_y = int((current_points[0][1] + current_points[1][1]) / 2)
-            cv2.putText(img, label, (mid_x-10, mid_y+5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            regions.append(tuple(current_points))
-            x1, y1 = current_points[0]
-            x2, y2 = current_points[1]
-            print(f"Region {len(regions)} saved: {x1},{y1},{x2},{y2}")
-            current_points = []
+            cv2.rectangle(img, currentPoints[0], currentPoints[1], color, 2)
+            label = f"{len(regions) + 1}"
+            midX = int((currentPoints[0][0] + currentPoints[1][0]) / 2)
+            midY = int((currentPoints[0][1] + currentPoints[1][1]) / 2)
+            cv2.putText(
+                img,
+                label,
+                (midX - 10, midY + 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+            )
+            regions.append(tuple(currentPoints))
+            x1, y1 = currentPoints[0]
+            x2, y2 = currentPoints[1]
+            key = roiKeys[keyIdx]
+            roiMap[key] = (x1, y1, x2, y2)
+            print(f"{key} saved: {x1},{y1},{x2},{y2}")
+            keyIdx += 1
+            currentPoints = []
+            announceKey()
 
-    # Right click → reset
+    # Right click - reset
     elif event == cv2.EVENT_RBUTTONDOWN:
         img[:] = clone.copy()
         regions.clear()
-        current_points.clear()
+        currentPoints.clear()
+        roiMap.clear()
+        keyIdx = 0
         print("Reset all regions")
+        announceKey()
+
 
 # Create window
 cv2.namedWindow("Mark ROIs")
-cv2.setMouseCallback("Mark ROIs", click_event)
+cv2.setMouseCallback("Mark ROIs", clickEvent)
 
-print("Left-click twice to draw ROI boxes. Right-click to reset.")
+print("Left-click twice to draw ROI boxes. Right-click to reset. SPACE to skip a key (0,0,0,0).")
+announceKey()
 while True:
     cv2.imshow("Mark ROIs", img)
     key = cv2.waitKey(1) & 0xFF
+    if key == 32:  # SPACE to skip current key
+        if keyIdx < len(roiKeys):
+            skipKey = roiKeys[keyIdx]
+            roiMap[skipKey] = (0, 0, 0, 0)
+            print(f"{skipKey} skipped: 0,0,0,0")
+            keyIdx += 1
+            announceKey()
+        else:
+            print("All keys filled. Press ESC to quit or right-click to reset.")
     if key == 27:  # ESC to quit
         break
 
 cv2.destroyAllWindows()
 
 # Print regions for copy-pasting
-print("\nFinal ROI coordinates:")
-for i, (p1, p2) in enumerate(regions, 1):
-    x1, y1 = p1
-    x2, y2 = p2
-    print(f"ROI {i}: {x1},{y1},{x2},{y2}")
+print("\nPaste into regions = {")
+for key in roiKeys:
+    x1, y1, x2, y2 = roiMap.get(key, (0, 0, 0, 0))
+    print(f"    \"{key}\": ({x1},{y1},{x2},{y2}),")
+print("}")
