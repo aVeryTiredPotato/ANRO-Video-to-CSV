@@ -37,7 +37,7 @@ regions = {
 
 # --- Sampling Control ---
 # Set how many frames per second to OCR (e.g., 60, 30, 15). None means process all frames.
-sampleFpsConst = 15
+sampleFpsConst = None
 
 # Debug output for ROI snapshots (set False to disable extra images and conf columns)
 debugToggle = True
