@@ -105,7 +105,7 @@ roiPad = {
 
 # --- Sanity Ranges ---
 ranges = {
-    "temperature":    (300, 4000),
+    "temperature":    (300, 20000),
     "pressure":       (500, 15000),
     "fuel":           (0, 100),
     "rodInsertion":  (0, 100),
