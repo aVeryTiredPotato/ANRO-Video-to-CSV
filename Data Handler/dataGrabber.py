@@ -13,34 +13,8 @@ from typing import Optional
 
 # --- Paths ---
 baseDir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# --- Regions of Interest (ROIs) --- (ensure that you change these values per video, no two videos will have the same coordinates)
-regions = {
-    "coolant": (0,0,0,0),
-    "rodInsertion": (252,77,329,122),
-    "feedwater": (215,190,377,247),
-    "fuel": (251,297,352,338),
-    "pressure": (378,418,508,459),
-    "temperature": (402,468,495,499),
-    "waterLevel": (0,0,0,0),
-    "feedwaterFlow": (0,0,0,0),
-    "totalOutput": (866,229,984,284),
-    "currentPowerOrder": (930,326,1043,375),
-    "marginOfError": (1007,392,1101,429),
-    "flowRate1": (1440,1132,1498,1154),
-    "rpm1": (1709,1155,1736,1175),
-    "valvesPct1": (1443,1080,1491,1104),
-    "flowRate2": (0,0,0,0),
-    "rpm2": (0,0,0,0),
-    "valvesPct2": (0,0,0,0),
-}
-
-# --- Sampling Control ---
-# Set how many frames per second to OCR (e.g., 60, 30, 15). None means process all frames.
-sampleFpsConst = None
-
-# Debug output for ROI snapshots (set False to disable extra images and conf columns)
-debugToggle = True
+scriptDir = os.path.dirname(os.path.abspath(__file__))
+regionsFile = os.path.join(scriptDir, "roi_regions.txt")
 
 def pickLatestVideo(rootDir: str) -> str:
     exts = {".mp4", ".mkv"}
@@ -55,8 +29,51 @@ def pickLatestVideo(rootDir: str) -> str:
         raise FileNotFoundError(f"No video files found in {rootDir}")
     return max(candidates, key=lambda p: os.path.getmtime(p))
 
+def loadRegionsFromFile(path: str):
+    if not os.path.isfile(path):
+        return None
+    regions = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, coords = line.split("=", 1)
+                key = key.strip()
+                parts = [p.strip() for p in coords.split(",")]
+                if len(parts) != 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = (int(p) for p in parts)
+                except ValueError:
+                    continue
+                regions[key] = (x1, y1, x2, y2)
+    except Exception as e:
+        print(f"Warning: failed to load ROI regions from {path}: {e}")
+        return None
+    return regions if regions else None
+
 videoPath = pickLatestVideo(baseDir)
 print(f"Using video: {videoPath}")
+
+# --- Regions of Interest (ROIs) --- (must be generated per video via boundaryFinder.py)
+regions = loadRegionsFromFile(regionsFile)
+if not regions:
+    raise FileNotFoundError(
+        f"ROI regions file not found or empty: {regionsFile}. "
+        "Run boundaryFinder.py to generate it for this video."
+    )
+print(f"Loaded ROI regions from {regionsFile}")
+
+# --- Sampling Control ---
+# Set how many frames per second to OCR (e.g., 60, 30, 15). None means process all frames.
+sampleFpsConst = None
+
+# Debug output for ROI snapshots (set False to disable extra images and conf columns)
+debugToggle = False
 
 # --- GPU Initialization ---
 # Allow forcing CPU via CLI flag --force-cpu to avoid CUDA hangs
@@ -105,7 +122,7 @@ roiPad = {
 
 # --- Sanity Ranges ---
 ranges = {
-    "temperature":    (300, 20000),
+    "temperature":    (300, 10000),
     "pressure":       (500, 15000),
     "fuel":           (0, 100),
     "rodInsertion":  (0, 100),
@@ -1304,10 +1321,10 @@ try:
         if not debugToggle:
             try:
                 dfClean = pd.read_csv(outputPath)
-                # Keep per-field confidence columns, drop raw only
-                dfClean = dfClean[[c for c in dfClean.columns if not c.startswith(("_raw_",))]]
+                # Drop debug-only columns when debug is off
+                dfClean = dfClean[[c for c in dfClean.columns if not c.startswith(("_raw_", "_conf_"))]]
                 dfClean.to_csv(outputPath, index=False)
-                print("Kept _conf_* columns; stripped _raw_ (DEBUG_TOGGLE=False).")
+                print("Stripped _raw_* and _conf_* (DEBUG_TOGGLE=False).")
             except Exception as e:
                 print(f"Warning: failed to strip debug columns: {e}")
     else:
@@ -1316,9 +1333,9 @@ try:
         if not debugToggle:
             try:
                 dfClean = pd.read_csv(outputPath)
-                dfClean = dfClean[[c for c in dfClean.columns if not c.startswith(("_raw_",))]]
+                dfClean = dfClean[[c for c in dfClean.columns if not c.startswith(("_raw_", "_conf_"))]]
                 dfClean.to_csv(outputPath, index=False)
-                print("Kept _conf_* columns; stripped _raw_ (DEBUG_TOGGLE=False).")
+                print("Stripped _raw_* and _conf_* (DEBUG_TOGGLE=False).")
             except Exception as e:
                 print(f"Warning: failed to strip debug columns: {e}")
 except Exception as e:
