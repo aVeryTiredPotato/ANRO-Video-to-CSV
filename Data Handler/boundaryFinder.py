@@ -9,6 +9,7 @@ print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU de
 # Paths
 scriptDir = os.path.dirname(os.path.abspath(__file__))
 baseDir = os.path.abspath(os.path.join(scriptDir, ".."))
+regionsOutPath = os.path.join(scriptDir, "roi_regions.txt")
 
 def pickLatestVideo(rootDir: str) -> str:
     exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv"}
@@ -157,3 +158,15 @@ for key in roiKeys:
     x1, y1, x2, y2 = roiMap.get(key, (0, 0, 0, 0))
     print(f"    \"{key}\": ({x1},{y1},{x2},{y2}),")
 print("}")
+
+# Write regions to a text file for dataGrabber.py
+try:
+    with open(regionsOutPath, "w", encoding="utf-8") as f:
+        f.write("# ROI regions for dataGrabber.py\n")
+        f.write("# format: key=x1,y1,x2,y2\n")
+        for key in roiKeys:
+            x1, y1, x2, y2 = roiMap.get(key, (0, 0, 0, 0))
+            f.write(f"{key}={x1},{y1},{x2},{y2}\n")
+    print(f"\nSaved regions to: {regionsOutPath}")
+except Exception as e:
+    print(f"\nWarning: failed to write regions file: {e}")
