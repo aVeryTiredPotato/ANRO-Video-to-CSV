@@ -11,12 +11,22 @@ import sys
 import subprocess
 from typing import Optional
 
+# Ensure line-buffered output for GUI log streaming
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 # --- Paths ---
 baseDir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 scriptDir = os.path.dirname(os.path.abspath(__file__))
 regionsFile = os.path.join(scriptDir, "roi_regions.txt")
 
 def pickLatestVideo(rootDir: str) -> str:
+    override = os.environ.get("ANRO_VIDEO")
+    if override and os.path.isfile(override):
+        return override
     exts = {".mp4", ".mkv"}
     candidates = []
     for name in os.listdir(rootDir):
@@ -128,6 +138,12 @@ ranges = {
     "rodInsertion":  (0, 100),
     "waterLevel":    (0, 100),   # 0–100 %
     "feedwaterFlow": (0, 2.0),   # 0–~2 L/s (0, 0.91, 1.83)
+    "fwpFlowRate1": (0.0, 1.5),
+    "fwpUtilization1": (0.0, 100.0),
+    "fwpRpm1": (0, 5000),
+    "fwpFlowRate2": (0.0, 1.5),
+    "fwpUtilization2": (0.0, 100.0),
+    "fwpRpm2": (0, 5000),
     "totalOutput": (0, 50000),
     "currentPowerOrder": (0, 50000),
     "marginOfError": (1000, 1500),
@@ -137,6 +153,8 @@ ranges = {
     "rpm2": (0, 5000),
     "valvesPct1": (0.0, 100.0),
     "valvesPct2": (0.0, 100.0),
+    "vibration1": (100.0, 500.0),
+    "vibration2": (100.0, 500.0),
 }
 
 
@@ -150,15 +168,32 @@ confThresh = {
     "totalOutput": 0.20,
     "currentPowerOrder": 0.20,
     "marginOfError": 0.20,
+    "fwpFlowRate1": 0.20,
+    "fwpUtilization1": 0.20,
+    "fwpRpm1": 0.20,
+    "fwpFlowRate2": 0.20,
+    "fwpUtilization2": 0.20,
+    "fwpRpm2": 0.20,
     "flowRate1": 0.20,
     "flowRate2": 0.20,
     "rpm1": 0.20,
     "rpm2": 0.20,
     "valvesPct1": 0.20,
     "valvesPct2": 0.20,
+    "vibration1": 0.20,
+    "vibration2": 0.20,
 }
 # Decimal handling for fields that include decimals in-range
-decimalKeys = {"flowRate1", "flowRate2", "valvesPct1", "valvesPct2"}
+decimalKeys = {
+    "flowRate1",
+    "flowRate2",
+    "valvesPct1",
+    "valvesPct2",
+    "fwpFlowRate1",
+    "fwpFlowRate2",
+    "fwpUtilization1",
+    "fwpUtilization2",
+}
 keyDecimals = {
     "temperature": 1,
     "pressure": 1,
@@ -166,6 +201,12 @@ keyDecimals = {
     "rodInsertion": 1,
     "waterLevel": 1,
     "feedwaterFlow": 2,
+    "fwpFlowRate1": 2,
+    "fwpUtilization1": 1,
+    "fwpRpm1": 0,
+    "fwpFlowRate2": 2,
+    "fwpUtilization2": 1,
+    "fwpRpm2": 0,
     "totalOutput": 0,
     "currentPowerOrder": 0,
     "marginOfError": 0,
@@ -175,6 +216,8 @@ keyDecimals = {
     "rpm2": 0,
     "valvesPct1": 1,
     "valvesPct2": 1,
+    "vibration1": 0,
+    "vibration2": 0,
 }
 # Max allowed change per frame for constrained signals
 maxDeltaPerFrame = {"fuel": 0.1}
@@ -292,6 +335,8 @@ _patterns = {
     'rpm': re.compile(r"^(?P<VAL>\d{1,5}(?:\.\d)?)(?:RPM)?$"),
     # Optional L/S suffix
     'flow': re.compile(r"^(?P<VAL>\d{1,3}(?:\.\d{1,2})?)(?:L/S|LS)?$"),
+    # Plain numeric (no units)
+    'plain': re.compile(r"^(?P<VAL>\d{1,4}(?:\.\d)?)$"),
 }
 
 def _coerceDecimalForRange(key: str, val: float, text: str):
@@ -328,7 +373,15 @@ def _extractValueForKey(key: str, text: str):
         m = _patterns['rpm'].match(t)
         val = float(m.group('VAL')) if m else None
         return _coerceDecimalForRange(key, val, t)
+    if key in ("fwpRpm1", "fwpRpm2"):
+        m = _patterns['rpm'].match(t)
+        val = float(m.group('VAL')) if m else None
+        return _coerceDecimalForRange(key, val, t)
     if key in ("flowRate1", "flowRate2"):
+        m = _patterns['flow'].match(t)
+        val = float(m.group('VAL')) if m else None
+        return _coerceDecimalForRange(key, val, t)
+    if key in ("fwpFlowRate1", "fwpFlowRate2"):
         m = _patterns['flow'].match(t)
         val = float(m.group('VAL')) if m else None
         return _coerceDecimalForRange(key, val, t)
@@ -336,6 +389,13 @@ def _extractValueForKey(key: str, text: str):
         m = _patterns['percent_opt'].match(t)
         val = float(m.group('VAL')) if m else None
         return _coerceDecimalForRange(key, val, t)
+    if key in ("fwpUtilization1", "fwpUtilization2"):
+        m = _patterns['percent_opt'].match(t)
+        val = float(m.group('VAL')) if m else None
+        return _coerceDecimalForRange(key, val, t)
+    if key in ("vibration1", "vibration2"):
+        m = _patterns['plain'].match(t)
+        return float(m.group('VAL')) if m else None
     return None
 
 def parseWaterLevel(text: str, prev: Optional[float] = None):
@@ -427,9 +487,15 @@ def _unitBonus(key: str, text: str) -> float:
         return 0.10
     if key in ("rpm1", "rpm2") and 'RPM' in t:
         return 0.10
+    if key in ("fwpRpm1", "fwpRpm2") and 'RPM' in t:
+        return 0.10
     if key in ("flowRate1", "flowRate2") and ('L/S' in t or 'LS' in t):
         return 0.10
+    if key in ("fwpFlowRate1", "fwpFlowRate2") and ('L/S' in t or 'LS' in t):
+        return 0.10
     if key in ("valvesPct1", "valvesPct2") and '%' in t:
+        return 0.10
+    if key in ("fwpUtilization1", "fwpUtilization2") and '%' in t:
         return 0.10
     return 0.0
 
@@ -479,10 +545,12 @@ def ocrNumericForKey(key: str, variants):
                 allowedLetters = {"K", "P", "A"}
             elif key in ("totalOutput", "currentPowerOrder", "marginOfError"):
                 allowedLetters = {"K", "W"}
-            elif key in ("rpm1", "rpm2"):
+            elif key in ("rpm1", "rpm2", "fwpRpm1", "fwpRpm2"):
                 allowedLetters = {"R", "P", "M"}
-            elif key in ("flowRate1", "flowRate2"):
+            elif key in ("flowRate1", "flowRate2", "fwpFlowRate1", "fwpFlowRate2"):
                 allowedLetters = {"L", "S"}
+            elif key in ("fwpUtilization1", "fwpUtilization2"):
+                allowedLetters = {"%"}
             else:
                 allowedLetters = set()
             if any(ch.isalpha() and ch not in allowedLetters for ch in tnorm):
@@ -637,45 +705,82 @@ pendingUpdates = {
 # Max per-frame believable jump for water level (in %)
 maxDeltaWaterPerFrame = 1.0
 
-
 # Pending large-jump acceptance to avoid lock-in
 maxJumpPerFrame = {
     "temperature": 120.0,
     "pressure": 120.0,
     "rodInsertion": 2.0,
     "totalOutput": 200.0,
+    "fwpRpm1": 10.0,
+    "fwpRpm2": 10.0,
+    "fwpFlowRate1": 0.02,
+    "fwpFlowRate2": 0.02,
+    "fwpUtilization1": 0.2,
+    "fwpUtilization2": 0.2,
     "rpm1": 10.0,
     "rpm2": 10.0,
     "flowRate1": 0.02,
     "flowRate2": 0.02,
     "valvesPct1": 0.2,
     "valvesPct2": 0.2,
+    "vibration1": 20.0,
+    "vibration2": 20.0,
 }
 jumpStabilityThresh = {
     "temperature": 30.0,
     "pressure": 50.0,
     "rodInsertion": 1.0,
     "totalOutput": float("inf"),
+    "fwpRpm1": float("inf"),
+    "fwpRpm2": float("inf"),
+    "fwpFlowRate1": float("inf"),
+    "fwpFlowRate2": float("inf"),
+    "fwpUtilization1": float("inf"),
+    "fwpUtilization2": float("inf"),
     "rpm1": float("inf"),
     "rpm2": float("inf"),
     "flowRate1": float("inf"),
     "flowRate2": float("inf"),
     "valvesPct1": float("inf"),
     "valvesPct2": float("inf"),
+    "vibration1": float("inf"),
+    "vibration2": float("inf"),
 }  # how close consecutive jump candidates must be
 jumpAcceptCount = {
     "temperature": 2,
     "pressure": 2,
     "rodInsertion": 2,
     "totalOutput": 3,
+    "fwpRpm1": 3,
+    "fwpRpm2": 3,
+    "fwpFlowRate1": 3,
+    "fwpFlowRate2": 3,
+    "fwpUtilization1": 3,
+    "fwpUtilization2": 3,
     "rpm1": 3,
     "rpm2": 3,
     "flowRate1": 3,
     "flowRate2": 3,
     "valvesPct1": 3,
     "valvesPct2": 3,
+    "vibration1": 3,
+    "vibration2": 3,
 }
 pendingJumps = {k: {"cand": None, "count": 0} for k in maxJumpPerFrame}
+
+# Lag-spike detection (network hiccups): if a value is unchanged for >=1s then jumps a lot,
+# treat it as a lag spike unless confirmed by consecutive frames.
+lagHoldSeconds = 1.0
+lagJumpFraction = 0.05  # 5% of full range
+lagDetectKeys = {k for k in ranges.keys()}
+lagJumpThreshold = {
+    k: max(
+        maxJumpPerFrame.get(k, 0.0) * 3.0,
+        (ranges[k][1] - ranges[k][0]) * lagJumpFraction
+    )
+    for k in lagDetectKeys
+}
+pendingLag = {k: {"cand": None, "count": 0} for k in lagDetectKeys}
 
 # Raw CSV output (no smoothing/interpolation)
 rawOutputCsv = "reactor_readings_raw.csv"
@@ -753,6 +858,12 @@ lastOk = {
     "rodInsertion": None,
     "waterLevel": None,
     "feedwaterFlow": None,
+    "fwpFlowRate1": None,
+    "fwpUtilization1": None,
+    "fwpRpm1": None,
+    "fwpFlowRate2": None,
+    "fwpUtilization2": None,
+    "fwpRpm2": None,
     "totalOutput": None,
     "currentPowerOrder": None,
     "rpm1": None,
@@ -761,7 +872,12 @@ lastOk = {
     "flowRate2": None,
     "valvesPct1": None,
     "valvesPct2": None,
+    "vibration1": None,
+    "vibration2": None,
 }
+lastConf = {k: None for k in lastOk.keys()}
+lastRaw = {k: None for k in lastOk.keys()}
+lastChangeTime = {k: None for k in lastOk.keys()}
 
 print(f"Processing {len(sampleIndices)} sampled frames (of {totalFrames}) from {videoPath}...")
 
@@ -783,7 +899,18 @@ def iterSampledFrames(cap, sampleIndices):
             target = sampleIndices[ptr]
         frameIdx += 1
 
-for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sampleIndices), desc="Extracting OCR Data", ncols=80):
+for frameIdx, frame in tqdm(
+    iterSampledFrames(cap, sampleIndices),
+    total=len(sampleIndices),
+    desc="Extracting OCR Data",
+    ncols=80,
+    file=sys.stdout,
+):
+
+    prevLastOk = lastOk.copy()
+    prevLastConf = lastConf.copy()
+    prevLastRaw = lastRaw.copy()
+    prevLastChange = lastChangeTime.copy()
 
     # Frame hash skip: avoid reprocessing identical frames
     try:
@@ -803,7 +930,7 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
         row[f"_conf_{key}"] = np.nan
 
     # First: build ROIs and fast variants per key (heavy variants built lazily on demand)
-    roiMap, fastMap, varMap = {}, {}, {}
+    roiMap, fastMap, varMap, roiCoords = {}, {}, {}, {}
     roiHashes, cacheHits = {}, {}
     for key, (x1, y1, x2, y2) in regions.items():
         try:
@@ -822,6 +949,7 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
                 raise ValueError(f"Invalid ROI for {key}: {(x1,y1,x2,y2)} -> {(x1p,y1p,x2p,y2p)}")
             roi = frame[y1p:y2p, x1p:x2p]
             roiMap[key] = roi
+            roiCoords[key] = (x1p, y1p, x2p, y2p)
             roiHash = hash(roi.tobytes())
             roiHashes[key] = roiHash
             cached = roiHashCache.get(key)
@@ -850,6 +978,12 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
         "rodInsertion",
         "waterLevel",
         "feedwaterFlow",
+        "fwpFlowRate1",
+        "fwpUtilization1",
+        "fwpRpm1",
+        "fwpFlowRate2",
+        "fwpUtilization2",
+        "fwpRpm2",
         "totalOutput",
         "currentPowerOrder",
         "marginOfError",
@@ -858,7 +992,9 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
         "rpm1",
         "rpm2",
         "valvesPct1",
-        "valvesPct2"
+        "valvesPct2",
+        "vibration1",
+        "vibration2"
     ) if k in roiMap and k not in cacheHits]
 
     stateKeys = [k for k in ("coolant",) if k in roiMap and k not in cacheHits]
@@ -1033,7 +1169,11 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
                     pendingUpdates["waterLevel"] = {"cand":None,"count":0}
 
                 if val is not None:
+                    if val != lastOk.get("waterLevel"):
+                        lastChangeTime["waterLevel"] = timestamp
                     lastOk["waterLevel"] = val
+                    lastConf["waterLevel"] = float(conf)
+                    lastRaw["waterLevel"] = txt
 
                 row[key] = val
                 row["_raw_"+key] = txt
@@ -1084,7 +1224,11 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
                     pendingUpdates["feedwaterFlow"] = {"cand":None,"count":0}
 
                 if val is not None:
+                    if val != lastOk.get("feedwaterFlow"):
+                        lastChangeTime["feedwaterFlow"] = timestamp
                     lastOk["feedwaterFlow"] = val
+                    lastConf["feedwaterFlow"] = float(conf)
+                    lastRaw["feedwaterFlow"] = txt
 
                 row[key] = val
                 row["_raw_"+key] = txt
@@ -1110,8 +1254,35 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
             if key in ("currentPowerOrder", "marginOfError"):
                 v = applyCurrentPowerOrderRule(lastOk.get(key), v)
 
+            lagAccepted = False
+            if key in lagDetectKeys:
+                prevLag = lastOk.get(key)
+                if v is not None and prevLag is not None and v != prevLag:
+                    lastChange = lastChangeTime.get(key)
+                    if lastChange is None:
+                        lastChange = timestamp
+                        lastChangeTime[key] = timestamp
+                    holdSec = float(timestamp - lastChange)
+                    thresh = lagJumpThreshold.get(key)
+                    if holdSec >= lagHoldSeconds and thresh is not None and abs(v - prevLag) >= thresh:
+                        pl = pendingLag[key]
+                        if pl["cand"] is not None and abs(v - pl["cand"]) <= jumpStabilityThresh.get(key, thresh):
+                            pl["count"] += 1
+                        else:
+                            pl["cand"], pl["count"] = v, 1
+                        if pl["count"] >= 2:
+                            v = pl["cand"]
+                            pendingLag[key] = {"cand": None, "count": 0}
+                            lagAccepted = True
+                        else:
+                            v = prevLag
+                    else:
+                        pendingLag[key] = {"cand": None, "count": 0}
+                else:
+                    pendingLag[key] = {"cand": None, "count": 0}
+
             # smoothing using last_ok + jump filters
-            if key in maxJumpPerFrame:
+            if key in maxJumpPerFrame and not lagAccepted:
                 prev = lastOk[key]
                 if v is not None and prev is not None and abs(v - prev) > maxJumpPerFrame[key]:
                     pj = pendingJumps[key]
@@ -1128,7 +1299,11 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
                     pendingJumps[key] = {"cand":None,"count":0}
 
             if v is not None:
+                if v != lastOk.get(key):
+                    lastChangeTime[key] = timestamp
                 lastOk[key] = v
+                lastConf[key] = float(conf)
+                lastRaw[key] = rawt
 
             row[key] = v
             row["_raw_"+key] = rawt
@@ -1142,6 +1317,76 @@ for frameIdx, frame in tqdm(iterSampledFrames(cap, sampleIndices), total=len(sam
             row[key] = lastOk.get(key, None)
             row["_conf_"+key] = 0.0
 
+    # Global lag-spike filter: if all numbers were static >= lagHoldSeconds
+    # and current frame introduces only large jumps, treat as lag spike.
+    lastAnyChange = max([t for t in prevLastChange.values() if t is not None], default=None)
+    holdSec = float(timestamp - lastAnyChange) if lastAnyChange is not None else 0.0
+    changedKeys = []
+    bigJumpKeys = []
+    for k in lastOk.keys():
+        if k not in row:
+            continue
+        prevV = prevLastOk.get(k)
+        curV = row.get(k)
+        if prevV is None or curV is None:
+            continue
+        if curV != prevV:
+            changedKeys.append(k)
+            thresh = lagJumpThreshold.get(k)
+            if thresh is not None and abs(curV - prevV) >= thresh:
+                bigJumpKeys.append(k)
+
+    lagSpike = (
+        bool(changedKeys)
+        and holdSec >= lagHoldSeconds
+        and len(bigJumpKeys) == len(changedKeys)
+    )
+
+    if lagSpike:
+        # Revert to previous values and metadata
+        for k in lastOk.keys():
+            if k in row:
+                row[k] = prevLastOk.get(k)
+                if f"_conf_{k}" in row:
+                    row[f"_conf_{k}"] = prevLastConf.get(k)
+                if f"_raw_{k}" in row:
+                    row[f"_raw_{k}"] = prevLastRaw.get(k)
+            if k in changedKeys:
+                roiHashCache.pop(k, None)
+        lastOk = prevLastOk
+        lastConf = prevLastConf
+        lastRaw = prevLastRaw
+        lastChangeTime = prevLastChange
+
+    if debugToggle and (frameIdx % roiDebugRate == 0):
+        try:
+            overlay = frame.copy()
+            for k, (x1p, y1p, x2p, y2p) in roiCoords.items():
+                cv2.rectangle(overlay, (x1p, y1p), (x2p, y2p), (0, 255, 0), 2)
+                val = row.get(k)
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    disp = "NA"
+                else:
+                    decimals = keyDecimals.get(k, None)
+                    if decimals is None and isinstance(val, (int, np.integer)):
+                        disp = f"{int(val)}"
+                    elif decimals is not None and isinstance(val, (int, float, np.floating)):
+                        disp = f"{float(val):.{int(decimals)}f}"
+                    else:
+                        disp = str(val)
+                label = f"{k}:{disp}"
+                cv2.putText(
+                    overlay,
+                    label,
+                    (x1p + 2, max(0, y1p - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                )
+            cv2.imwrite(os.path.join(roiDebugDir, f"{frameIdx:04d}_overlay.png"), overlay)
+        except Exception as dbgE:
+            errors.append(f"Frame {frameIdx}: overlay save failed: {dbgE}")
 
     dataRows.append(row)
     # Also accumulate a raw (no smoothing/interpolation) row for export
@@ -1168,6 +1413,12 @@ for col in [
     "coolant",
     "waterLevel",
     "feedwaterFlow",
+    "fwpFlowRate1",
+    "fwpUtilization1",
+    "fwpRpm1",
+    "fwpFlowRate2",
+    "fwpUtilization2",
+    "fwpRpm2",
     "totalOutput",
     "currentPowerOrder",
     "marginOfError",
@@ -1176,7 +1427,9 @@ for col in [
     "rpm1",
     "rpm2",
     "valvesPct1",
-    "valvesPct2"
+    "valvesPct2",
+    "vibration1",
+    "vibration2",
 ]:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -1264,6 +1517,12 @@ try:
             "coolant",
             "waterLevel",
             "feedwaterFlow",
+            "fwpFlowRate1",
+            "fwpUtilization1",
+            "fwpRpm1",
+            "fwpFlowRate2",
+            "fwpUtilization2",
+            "fwpRpm2",
             "totalOutput",
             "currentPowerOrder",
             "marginOfError",
@@ -1272,7 +1531,9 @@ try:
             "rpm1",
             "rpm2",
             "valvesPct1",
-            "valvesPct2"
+            "valvesPct2",
+            "vibration1",
+            "vibration2",
         ]:
             if col in dfRaw.columns:
                 dfRaw[col] = pd.to_numeric(dfRaw[col], errors="coerce")
@@ -1300,6 +1561,12 @@ try:
             "--roi-rod", _fmtRoi(regions.get("rodInsertion", (0,0,0,0))),
             "--roi-coolant", _fmtRoi(regions.get("coolant", (0,0,0,0))),
             "--roi-feedwater", _fmtRoi(regions.get("feedwater", (0,0,0,0))),
+            "--roi-fwp-flow-rate1", _fmtRoi(regions.get("fwpFlowRate1", (0,0,0,0))),
+            "--roi-fwp-utilization1", _fmtRoi(regions.get("fwpUtilization1", (0,0,0,0))),
+            "--roi-fwp-rpm1", _fmtRoi(regions.get("fwpRpm1", (0,0,0,0))),
+            "--roi-fwp-flow-rate2", _fmtRoi(regions.get("fwpFlowRate2", (0,0,0,0))),
+            "--roi-fwp-utilization2", _fmtRoi(regions.get("fwpUtilization2", (0,0,0,0))),
+            "--roi-fwp-rpm2", _fmtRoi(regions.get("fwpRpm2", (0,0,0,0))),
             "--roi-total-output", _fmtRoi(regions.get("totalOutput", (0,0,0,0))),
             "--roi-current-power-order", _fmtRoi(regions.get("currentPowerOrder", (0,0,0,0))),
             "--roi-margin-of-error", _fmtRoi(regions.get("marginOfError", (0,0,0,0))),
@@ -1309,6 +1576,8 @@ try:
             "--roi-rpm2", _fmtRoi(regions.get("rpm2", (0,0,0,0))),
             "--roi-valves-pct1", _fmtRoi(regions.get("valvesPct1", (0,0,0,0))),
             "--roi-valves-pct2", _fmtRoi(regions.get("valvesPct2", (0,0,0,0))),
+            "--roi-vibration1", _fmtRoi(regions.get("vibration1", (0,0,0,0))),
+            "--roi-vibration2", _fmtRoi(regions.get("vibration2", (0,0,0,0))),
         ]
         # Pass raw CSV if available
         if rawOutputPath and os.path.isfile(rawOutputPath):
