@@ -22,6 +22,12 @@ keyNumeric = [
     "feedwater",
     "waterLevel",
     "feedwaterFlow",
+    "fwpFlowRate1",
+    "fwpUtilization1",
+    "fwpRpm1",
+    "fwpFlowRate2",
+    "fwpUtilization2",
+    "fwpRpm2",
     "totalOutput",
     "currentPowerOrder",
     "marginOfError",
@@ -31,6 +37,8 @@ keyNumeric = [
     "rpm2",
     "valvesPct1",
     "valvesPct2",
+    "vibration1",
+    "vibration2",
 ]
 keyState = ["coolant", "feedwater"]
 
