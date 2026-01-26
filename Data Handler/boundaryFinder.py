@@ -2,6 +2,14 @@ import os
 import cv2
 import random
 import torch
+import sys
+
+# Ensure line-buffered output for GUI log streaming
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 print(torch.cuda.is_available())
 print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU detected")
@@ -12,6 +20,9 @@ baseDir = os.path.abspath(os.path.join(scriptDir, ".."))
 regionsOutPath = os.path.join(scriptDir, "roi_regions.txt")
 
 def pickLatestVideo(rootDir: str) -> str:
+    override = os.environ.get("ANRO_VIDEO")
+    if override and os.path.isfile(override):
+        return override
     exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv"}
     candidates = []
     for name in os.listdir(rootDir):
@@ -55,6 +66,14 @@ roiKeys = [
     # Feedwater readings
     "waterLevel",
     "feedwaterFlow",
+    # Feedwater pump 1
+    "fwpFlowRate1",
+    "fwpUtilization1",
+    "fwpRpm1",
+    # Feedwater pump 2
+    "fwpFlowRate2",
+    "fwpUtilization2",
+    "fwpRpm2",
     # Power output readings
     "totalOutput",
     "currentPowerOrder",
@@ -63,11 +82,34 @@ roiKeys = [
     "flowRate1",
     "rpm1",
     "valvesPct1",
+    "vibration1",
     # Turbine 2
     "flowRate2",
     "rpm2",
     "valvesPct2",
+    "vibration2",
 ]
+
+roiSections = [
+    ("primarySystems", ["coolant", "rodInsertion", "feedwater"]),
+    ("primaryReadings", ["fuel", "pressure", "temperature"]),
+    ("feedwaterReadings", ["waterLevel", "feedwaterFlow"]),
+    ("feedwaterPump1", ["fwpFlowRate1", "fwpUtilization1", "fwpRpm1"]),
+    ("feedwaterPump2", ["fwpFlowRate2", "fwpUtilization2", "fwpRpm2"]),
+    ("powerOutput", ["totalOutput", "currentPowerOrder", "marginOfError"]),
+    ("turbine1", ["flowRate1", "rpm1", "valvesPct1", "vibration1"]),
+    ("turbine2", ["flowRate2", "rpm2", "valvesPct2", "vibration2"]),
+]
+
+keyToSection = {}
+sectionOrder = [name for name, _ in roiSections]
+sectionToKeys = {}
+for name, keys in roiSections:
+    sectionToKeys[name] = keys
+    for key in keys:
+        keyToSection[key] = name
+
+sectionIndexByName = {name: i for i, name in enumerate(sectionOrder)}
 
 # Storage for marked regions
 regions = []
@@ -80,6 +122,21 @@ def announceKey():
         print(f"Current key: {roiKeys[keyIdx]} ({keyIdx + 1}/{len(roiKeys)})")
     else:
         print("All keys filled. Press ESC to quit or right-click to reset.")
+
+def skipSectionForKey(currentKey):
+    section = keyToSection.get(currentKey)
+    if not section:
+        return
+    keys = sectionToKeys.get(section, [])
+    for k in keys:
+        if k not in roiMap:
+            roiMap[k] = (0, 0, 0, 0)
+            print(f"{k} skipped: 0,0,0,0 (section {section})")
+
+def advanceKeyIndex():
+    global keyIdx
+    while keyIdx < len(roiKeys) and roiKeys[keyIdx] in roiMap:
+        keyIdx += 1
 
 def clickEvent(event, x, y, flags, param):
     global currentPoints, img, keyIdx
@@ -115,6 +172,7 @@ def clickEvent(event, x, y, flags, param):
             roiMap[key] = (x1, y1, x2, y2)
             print(f"{key} saved: {x1},{y1},{x2},{y2}")
             keyIdx += 1
+            advanceKeyIndex()
             currentPoints = []
             announceKey()
 
@@ -129,8 +187,22 @@ def clickEvent(event, x, y, flags, param):
         announceKey()
 
 
-# Create window
-cv2.namedWindow("Mark ROIs")
+# Create window (center it so it doesn't appear off-screen)
+cv2.namedWindow("Mark ROIs", cv2.WINDOW_NORMAL)
+try:
+    import tkinter as tk
+    _root = tk.Tk()
+    _root.withdraw()
+    screenW = _root.winfo_screenwidth()
+    screenH = _root.winfo_screenheight()
+    _root.destroy()
+    winW = img.shape[1]
+    winH = img.shape[0]
+    posX = max(0, int((screenW - winW) / 2))
+    posY = max(0, int((screenH - winH) / 2))
+    cv2.moveWindow("Mark ROIs", posX, posY)
+except Exception:
+    pass
 cv2.setMouseCallback("Mark ROIs", clickEvent)
 
 print("Left-click twice to draw ROI boxes. Right-click to reset. SPACE to skip a key (0,0,0,0).")
@@ -143,7 +215,10 @@ while True:
             skipKey = roiKeys[keyIdx]
             roiMap[skipKey] = (0, 0, 0, 0)
             print(f"{skipKey} skipped: 0,0,0,0")
+            # Skip the rest of the section
+            skipSectionForKey(skipKey)
             keyIdx += 1
+            advanceKeyIndex()
             announceKey()
         else:
             print("All keys filled. Press ESC to quit or right-click to reset.")
