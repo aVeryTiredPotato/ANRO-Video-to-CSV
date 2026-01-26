@@ -1550,8 +1550,7 @@ try:
         # Build ROI args from current config
         def _fmtRoi(t):
             return ",".join(str(int(v)) for v in t)
-        args = [
-            sys.executable, scriptPath,
+        resuscArgs = [
             "--video", videoPath,
             "--cleaned", outputPath,
             "--fps", str(float(fps)),
@@ -1581,9 +1580,25 @@ try:
         ]
         # Pass raw CSV if available
         if rawOutputPath and os.path.isfile(rawOutputPath):
-            args += ["--raw", rawOutputPath]
+            resuscArgs += ["--raw", rawOutputPath]
         print("\nLaunching resuscitation on low-confidence (_conf_*) fields...\n")
-        subprocess.run(args, check=False)
+        if getattr(sys, "frozen", False):
+            import importlib.util
+            oldArgv = sys.argv[:]
+            try:
+                sys.argv = [scriptPath] + resuscArgs
+                spec = importlib.util.spec_from_file_location("dataResuscitation", scriptPath)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "main"):
+                    mod.main()
+            except Exception as e:
+                print(f"Warning: failed to run resuscitation in-process: {e}")
+            finally:
+                sys.argv = oldArgv
+        else:
+            args = [sys.executable, scriptPath] + resuscArgs
+            subprocess.run(args, check=False)
 
         # dataResuscitation now writes directly to cleaned CSV.
         # Strip debug columns from cleaned output if DEBUG_TOGGLE is off.
@@ -1614,8 +1629,7 @@ except Exception as e:
 try:
     fbScript = os.path.join(os.path.dirname(__file__), "featuresBuilder.py")
     if os.path.isfile(fbScript):
-        argsFb = [
-            sys.executable, fbScript,
+        fbArgs = [
             "--input", outputPath,
             "--slope-window", "3",
             "--min-fuel", "75",
@@ -1625,11 +1639,26 @@ try:
             # Keep reasonable anomaly thresholds; can be tuned later
             "--rise-k-per-s", "10.0",
             "--dip-k-per-s", "10.0",
+            "--require-coolant-open",
         ]
-        # Require coolant open by default (aligned with stability def)
-        argsFb.append("--require-coolant-open")
         print("\nBuilding features and anomaly flags via featuresBuilder.py...\n")
-        subprocess.run(argsFb, check=False)
+        if getattr(sys, "frozen", False):
+            import importlib.util
+            oldArgv = sys.argv[:]
+            try:
+                sys.argv = [fbScript] + fbArgs
+                spec = importlib.util.spec_from_file_location("featuresBuilder", fbScript)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "main"):
+                    mod.main()
+            except Exception as e:
+                print(f"Warning: failed to run featuresBuilder in-process: {e}")
+            finally:
+                sys.argv = oldArgv
+        else:
+            argsFb = [sys.executable, fbScript] + fbArgs
+            subprocess.run(argsFb, check=False)
     else:
         print("Note: featuresBuilder.py not found; skipping features build.")
 except Exception as e:
