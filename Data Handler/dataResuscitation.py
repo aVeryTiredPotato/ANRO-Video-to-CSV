@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import pandas as pd
 import numpy as np
@@ -18,14 +19,31 @@ ranges = {
     "totalOutput": (0.0, 50000.0),
     "currentPowerOrder": (0.0, 50000.0),
     "marginOfError": (1000.0, 1500.0),
+    "fwpFlowRate1": (0.0, 1.5),
+    "fwpUtilization1": (0.0, 100.0),
+    "fwpRpm1": (0.0, 5000.0),
+    "fwpFlowRate2": (0.0, 1.5),
+    "fwpUtilization2": (0.0, 100.0),
+    "fwpRpm2": (0.0, 5000.0),
     "flowRate1": (0.0, 15.0),
     "flowRate2": (0.0, 15.0),
     "rpm1": (0.0, 5000.0),
     "rpm2": (0.0, 5000.0),
     "valvesPct1": (0.0, 100.0),
     "valvesPct2": (0.0, 100.0),
+    "vibration1": (100.0, 500.0),
+    "vibration2": (100.0, 500.0),
 }
-decimalKeys = {"flowRate1", "flowRate2", "valvesPct1", "valvesPct2"}
+decimalKeys = {
+    "flowRate1",
+    "flowRate2",
+    "valvesPct1",
+    "valvesPct2",
+    "fwpFlowRate1",
+    "fwpFlowRate2",
+    "fwpUtilization1",
+    "fwpUtilization2",
+}
 
 # Default jump thresholds per frame (can be overridden)
 defaultMaxJump = {
@@ -55,12 +73,20 @@ def loadCsv(path: str) -> pd.DataFrame:
         "totalOutput",
         "currentPowerOrder",
         "marginOfError",
+        "fwpFlowRate1",
+        "fwpUtilization1",
+        "fwpRpm1",
+        "fwpFlowRate2",
+        "fwpUtilization2",
+        "fwpRpm2",
         "flowRate1",
         "flowRate2",
         "rpm1",
         "rpm2",
         "valvesPct1",
         "valvesPct2",
+        "vibration1",
+        "vibration2",
     ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -140,6 +166,18 @@ def main():
                     default="2098,182,2176,152", help="x1,y1,x2,y2 for coolant state (optional)")
     ap.add_argument("--roi-feedwater", dest="roiFeedwater",
                     default="1921,381,2039,353", help="x1,y1,x2,y2 for feedwater (optional)")
+    ap.add_argument("--roi-fwp-flow-rate1", dest="roiFwpFlowRate1",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for FWP flow rate 1 (optional)")
+    ap.add_argument("--roi-fwp-utilization1", dest="roiFwpUtilization1",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for FWP utilization 1 (optional)")
+    ap.add_argument("--roi-fwp-rpm1", dest="roiFwpRpm1",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for FWP RPM 1 (optional)")
+    ap.add_argument("--roi-fwp-flow-rate2", dest="roiFwpFlowRate2",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for FWP flow rate 2 (optional)")
+    ap.add_argument("--roi-fwp-utilization2", dest="roiFwpUtilization2",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for FWP utilization 2 (optional)")
+    ap.add_argument("--roi-fwp-rpm2", dest="roiFwpRpm2",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for FWP RPM 2 (optional)")
     ap.add_argument("--roi-total-output", dest="roiTotalOutput",
                     default="0,0,0,0", help="x1,y1,x2,y2 for total output (optional)")
     ap.add_argument("--roi-current-power-order", dest="roiCurrentPowerOrder",
@@ -158,11 +196,15 @@ def main():
                     default="0,0,0,0", help="x1,y1,x2,y2 for valves percent 1 (optional)")
     ap.add_argument("--roi-valves-pct2", dest="roiValvesPct2",
                     default="0,0,0,0", help="x1,y1,x2,y2 for valves percent 2 (optional)")
+    ap.add_argument("--roi-vibration1", dest="roiVibration1",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for vibration 1 (optional)")
+    ap.add_argument("--roi-vibration2", dest="roiVibration2",
+                    default="0,0,0,0", help="x1,y1,x2,y2 for vibration 2 (optional)")
 
     # Re-OCR behavior
     ap.add_argument(
         "--keys",
-        default="temperature,pressure,fuel,rodInsertion,coolant,feedwater,totalOutput,currentPowerOrder,marginOfError,flowRate1,flowRate2,rpm1,rpm2,valvesPct1,valvesPct2",
+        default="temperature,pressure,fuel,rodInsertion,coolant,feedwater,totalOutput,currentPowerOrder,marginOfError,fwpFlowRate1,fwpUtilization1,fwpRpm1,fwpFlowRate2,fwpUtilization2,fwpRpm2,flowRate1,flowRate2,rpm1,rpm2,valvesPct1,valvesPct2,vibration1,vibration2",
         help="Comma list of keys to re-OCR (must have _conf_* columns present)"
     )
     ap.add_argument("--strict-conf-temperature", type=float, default=0.30)
@@ -191,6 +233,12 @@ def main():
         "rodInsertion": "numeric",
         "waterLevel": "numeric",
         "feedwaterFlow": "numeric",
+        "fwpFlowRate1": "numeric",
+        "fwpUtilization1": "numeric",
+        "fwpRpm1": "numeric",
+        "fwpFlowRate2": "numeric",
+        "fwpUtilization2": "numeric",
+        "fwpRpm2": "numeric",
         "totalOutput": "numeric",
         "currentPowerOrder": "numeric",
         "marginOfError": "numeric",
@@ -200,6 +248,8 @@ def main():
         "rpm2": "numeric",
         "valvesPct1": "numeric",
         "valvesPct2": "numeric",
+        "vibration1": "numeric",
+        "vibration2": "numeric",
         "coolant": "state",
         "feedwater": "feed",
     }
@@ -287,6 +337,12 @@ def main():
             "rodInsertion": _maybeParseRoi("rodInsertion", args.roiRod),
             "coolant": _maybeParseRoi("coolant", args.roiCoolant),
             "feedwater": _maybeParseRoi("feedwater", args.roiFeedwater),
+            "fwpFlowRate1": _maybeParseRoi("fwpFlowRate1", args.roiFwpFlowRate1),
+            "fwpUtilization1": _maybeParseRoi("fwpUtilization1", args.roiFwpUtilization1),
+            "fwpRpm1": _maybeParseRoi("fwpRpm1", args.roiFwpRpm1),
+            "fwpFlowRate2": _maybeParseRoi("fwpFlowRate2", args.roiFwpFlowRate2),
+            "fwpUtilization2": _maybeParseRoi("fwpUtilization2", args.roiFwpUtilization2),
+            "fwpRpm2": _maybeParseRoi("fwpRpm2", args.roiFwpRpm2),
             "totalOutput": _maybeParseRoi("totalOutput", args.roiTotalOutput),
             "currentPowerOrder": _maybeParseRoi("currentPowerOrder", args.roiCurrentPowerOrder),
             "marginOfError": _maybeParseRoi("marginOfError", args.roiMarginOfError),
@@ -296,6 +352,8 @@ def main():
             "rpm2": _maybeParseRoi("rpm2", args.roiRpm2),
             "valvesPct1": _maybeParseRoi("valvesPct1", args.roiValvesPct1),
             "valvesPct2": _maybeParseRoi("valvesPct2", args.roiValvesPct2),
+            "vibration1": _maybeParseRoi("vibration1", args.roiVibration1),
+            "vibration2": _maybeParseRoi("vibration2", args.roiVibration2),
         }.items() if v is not None
     }
 
@@ -350,6 +408,7 @@ def main():
         'kw': _re.compile(r"^(?P<VAL>\d{1,5}(?:\.\d)?)(?:KW)?$"),
         'rpm': _re.compile(r"^(?P<VAL>\d{1,5}(?:\.\d)?)(?:RPM)?$"),
         'flow': _re.compile(r"^(?P<VAL>\d{1,3}(?:\.\d{1,2})?)(?:L/S|LS)?$"),
+        'plain': _re.compile(r"^(?P<VAL>\d{1,4}(?:\.\d)?)$"),
     }
     def _normalizeText(s: str) -> str:
         return s.replace(',', '.').replace(' ', '').upper()
@@ -393,7 +452,15 @@ def main():
             m = _patterns['rpm'].match(t)
             val = float(m.group('VAL')) if m else None
             return _coerceDecimalForRange(key, val, t)
+        if key in ("fwpRpm1", "fwpRpm2"):
+            m = _patterns['rpm'].match(t)
+            val = float(m.group('VAL')) if m else None
+            return _coerceDecimalForRange(key, val, t)
         if key in ("flowRate1", "flowRate2"):
+            m = _patterns['flow'].match(t)
+            val = float(m.group('VAL')) if m else None
+            return _coerceDecimalForRange(key, val, t)
+        if key in ("fwpFlowRate1", "fwpFlowRate2"):
             m = _patterns['flow'].match(t)
             val = float(m.group('VAL')) if m else None
             return _coerceDecimalForRange(key, val, t)
@@ -401,6 +468,13 @@ def main():
             m = _patterns['percent_opt'].match(t)
             val = float(m.group('VAL')) if m else None
             return _coerceDecimalForRange(key, val, t)
+        if key in ("fwpUtilization1", "fwpUtilization2"):
+            m = _patterns['percent_opt'].match(t)
+            val = float(m.group('VAL')) if m else None
+            return _coerceDecimalForRange(key, val, t)
+        if key in ("vibration1", "vibration2"):
+            m = _patterns['plain'].match(t)
+            return float(m.group('VAL')) if m else None
         return None
 
     def _readtextMulti(images, allow=None):
@@ -565,7 +639,8 @@ def main():
     tasks.sort(key=lambda x: x[0])
 
     processedPairs = 0
-    pbar = tqdm(total=len(tasks), desc="Resuscitating", ncols=80) if tasks else None
+    outStream = sys.stdout if getattr(sys.stdout, "write", None) else sys.__stdout__
+    pbar = tqdm(total=len(tasks), desc="Resuscitating", ncols=80, file=outStream) if tasks else None
     if tasks:
         tasksByFrame = {}
         for frameIdx, idxRow, key in tasks:
